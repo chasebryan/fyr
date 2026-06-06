@@ -3,13 +3,16 @@ fn sum(values: [i64]) -> i64:
     for value in values:
         total = total + value
     return total
-
 let values = [3, 5, 8, 13]
 let more_values = append(values, 21)
 let middle_values = slice(more_values, 1, 4)
 let safe_missing = get(more_values, 99, -1)
 let found_index = find(more_values, 13)
 let value_count = count(more_values, 13)
+let reversed_values = reverse(more_values)
+let first_value = first(more_values, -1)
+let last_value = last(more_values, -1)
+let last_letter = last("Fyr", "?")
 let empty: [i64] = []
 print(sum(more_values))
 print(more_values[2])
@@ -17,5 +20,9 @@ print(middle_values)
 print(safe_missing)
 print(found_index)
 print(value_count)
+print(reversed_values)
+print(first_value)
+print(last_value)
+print(last_letter)
 print(len(empty))
 print(is_empty(empty))

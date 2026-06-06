@@ -4,5 +4,4 @@ fn fib(n: i64) -> i64:
         n
     else:
         fib(n - 1) + fib(n - 2)
-
 print(fib(10))

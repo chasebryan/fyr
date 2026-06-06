@@ -77,6 +77,42 @@ enum Flow {
     Continue,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Edge {
+    First,
+    Last,
+}
+
+impl Edge {
+    fn name(self) -> &'static str {
+        match self {
+            Edge::First => "first",
+            Edge::Last => "last",
+        }
+    }
+
+    fn default_context(self) -> &'static str {
+        match self {
+            Edge::First => "first default",
+            Edge::Last => "last default",
+        }
+    }
+
+    fn array_value(self, values: &[Value]) -> Option<Value> {
+        match self {
+            Edge::First => values.first().cloned(),
+            Edge::Last => values.last().cloned(),
+        }
+    }
+
+    fn string_value(self, value: &str) -> Option<char> {
+        match self {
+            Edge::First => value.chars().next(),
+            Edge::Last => value.chars().last(),
+        }
+    }
+}
+
 impl Evaluator {
     pub fn new() -> Self {
         Self {
@@ -119,6 +155,12 @@ impl Evaluator {
             Flow::Break => Err(runtime_error("break outside loop")),
             Flow::Continue => Err(runtime_error("continue outside loop")),
         }
+    }
+
+    pub fn predefine_declarations(&mut self, statements: &[Statement]) -> FyrResult<()> {
+        self.predefine_structs(statements)?;
+        self.predefine_functions(statements)?;
+        Ok(())
     }
 
     fn eval_statement_flow(&mut self, statement: &Statement) -> FyrResult<Flow> {
@@ -296,6 +338,7 @@ impl Evaluator {
             }
         }
 
+        ensure_homogeneous_array(&values, "array element")?;
         Ok(Flow::Value(Value::Array(values)))
     }
 
@@ -309,34 +352,54 @@ impl Evaluator {
             flow => return Ok(flow),
         };
 
-        let values = match collection {
-            Value::Array(values) => values,
-            other => {
-                return Err(runtime_error(format!(
-                    "indexing expected an array, found {}",
-                    other.type_name()
-                )));
-            }
-        };
-        let index = match index {
-            Value::Int(index) => index,
-            other => {
-                return Err(runtime_error(format!(
-                    "array index expected i64, found {}",
-                    other.type_name()
-                )));
-            }
-        };
+        match collection {
+            Value::Array(values) => {
+                let index = match index {
+                    Value::Int(index) => index,
+                    other => {
+                        return Err(runtime_error(format!(
+                            "array index expected i64, found {}",
+                            other.type_name()
+                        )));
+                    }
+                };
 
-        if index < 0 {
-            return Err(runtime_error(format!("array index {index} out of bounds")));
+                if index < 0 {
+                    return Err(runtime_error(format!("array index {index} out of bounds")));
+                }
+
+                values
+                    .get(index as usize)
+                    .cloned()
+                    .map(Flow::Value)
+                    .ok_or_else(|| runtime_error(format!("array index {index} out of bounds")))
+            }
+            Value::Str(value) => {
+                let index = match index {
+                    Value::Int(index) => index,
+                    other => {
+                        return Err(runtime_error(format!(
+                            "string index expected i64, found {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+
+                if index < 0 {
+                    return Err(runtime_error(format!("string index {index} out of bounds")));
+                }
+
+                value
+                    .chars()
+                    .nth(index as usize)
+                    .map(|ch| Flow::Value(Value::Str(ch.to_string())))
+                    .ok_or_else(|| runtime_error(format!("string index {index} out of bounds")))
+            }
+            other => Err(runtime_error(format!(
+                "indexing expected an array or str, found {}",
+                other.type_name()
+            ))),
         }
-
-        values
-            .get(index as usize)
-            .cloned()
-            .map(Flow::Value)
-            .ok_or_else(|| runtime_error(format!("array index {index} out of bounds")))
     }
 
     fn eval_struct_init(&mut self, name: &str, fields: &[(String, Expr)]) -> FyrResult<Flow> {
@@ -486,7 +549,11 @@ impl Evaluator {
             (Value::Str(left), BinaryOp::Add, Value::Str(right)) => {
                 Value::Str(format!("{left}{right}"))
             }
-            (Value::Array(mut left), BinaryOp::Add, Value::Array(right)) => {
+            (Value::Array(mut left), BinaryOp::Add, right @ Value::Array(_)) => {
+                ensure_array_concat_matches(&left, &right)?;
+                let Value::Array(right) = right else {
+                    unreachable!("array concatenation already matched arrays")
+                };
                 left.extend(right);
                 Value::Array(left)
             }
@@ -540,10 +607,24 @@ impl Evaluator {
             "contains" => self.eval_contains(args),
             "slice" => self.eval_slice(args),
             "append" => self.eval_append(args),
+            "reverse" => self.eval_reverse(args),
+            "first" => self.eval_edge(args, Edge::First),
+            "last" => self.eval_edge(args, Edge::Last),
             "is_empty" => self.eval_is_empty(args),
             "get" => self.eval_get(args),
             "find" => self.eval_find(args),
             "count" => self.eval_count(args),
+            "trim" => self.eval_string_transform(args, "trim", |value| value.trim().to_owned()),
+            "lower" => self.eval_string_transform(args, "lower", |value| value.to_lowercase()),
+            "upper" => self.eval_string_transform(args, "upper", |value| value.to_uppercase()),
+            "starts_with" => self.eval_string_predicate(args, "starts_with", |value, prefix| {
+                value.starts_with(prefix)
+            }),
+            "ends_with" => self
+                .eval_string_predicate(args, "ends_with", |value, suffix| value.ends_with(suffix)),
+            "replace" => self.eval_replace(args),
+            "split" => self.eval_split(args),
+            "join" => self.eval_join(args),
             "print" => {
                 if args.len() != 1 {
                     return Err(runtime_error("print expects exactly one argument"));
@@ -569,6 +650,106 @@ impl Evaluator {
         }
     }
 
+    fn eval_string_transform(
+        &mut self,
+        args: &[Expr],
+        name: &str,
+        transform: fn(String) -> String,
+    ) -> FyrResult<Flow> {
+        if args.len() != 1 {
+            return Err(runtime_error(format!(
+                "{name} expects exactly one argument"
+            )));
+        }
+
+        let value = self.eval_string_arg(&args[0], name)?;
+        Ok(Flow::Value(Value::Str(transform(value))))
+    }
+
+    fn eval_string_predicate(
+        &mut self,
+        args: &[Expr],
+        name: &str,
+        predicate: fn(&str, &str) -> bool,
+    ) -> FyrResult<Flow> {
+        if args.len() != 2 {
+            return Err(runtime_error(format!(
+                "{name} expects exactly two arguments"
+            )));
+        }
+
+        let value = self.eval_string_arg(&args[0], name)?;
+        let needle = self.eval_string_arg(&args[1], &format!("{name} value"))?;
+        Ok(Flow::Value(Value::Bool(predicate(&value, &needle))))
+    }
+
+    fn eval_replace(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 3 {
+            return Err(runtime_error("replace expects exactly three arguments"));
+        }
+
+        let value = self.eval_string_arg(&args[0], "replace")?;
+        let needle = self.eval_string_arg(&args[1], "replace old")?;
+        if needle.is_empty() {
+            return Err(runtime_error("replace old value must not be empty"));
+        }
+        let replacement = self.eval_string_arg(&args[2], "replace new")?;
+
+        Ok(Flow::Value(Value::Str(
+            value.replace(&needle, &replacement),
+        )))
+    }
+
+    fn eval_split(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 2 {
+            return Err(runtime_error("split expects exactly two arguments"));
+        }
+
+        let value = self.eval_string_arg(&args[0], "split")?;
+        let separator = self.eval_string_arg(&args[1], "split separator")?;
+        if separator.is_empty() {
+            return Err(runtime_error("split separator must not be empty"));
+        }
+
+        Ok(Flow::Value(Value::Array(
+            value
+                .split(&separator)
+                .map(|part| Value::Str(part.to_owned()))
+                .collect(),
+        )))
+    }
+
+    fn eval_join(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 2 {
+            return Err(runtime_error("join expects exactly two arguments"));
+        }
+
+        let parts = match self.eval_expr_flow(&args[0])? {
+            Flow::Value(Value::Array(values)) => values,
+            Flow::Value(other) => {
+                return Err(runtime_error(format!(
+                    "join expects [str], found {}",
+                    format_value_type(&other)
+                )));
+            }
+            flow => return Ok(flow),
+        };
+        let separator = self.eval_string_arg(&args[1], "join separator")?;
+        let parts = expect_string_array(parts, "join")?;
+
+        Ok(Flow::Value(Value::Str(parts.join(&separator))))
+    }
+
+    fn eval_string_arg(&mut self, arg: &Expr, context: &str) -> FyrResult<String> {
+        match self.eval_value(arg)? {
+            Value::Str(value) => Ok(value),
+            other => Err(runtime_error(format!(
+                "{context} expected str, found {}",
+                format_value_type(&other)
+            ))),
+        }
+    }
+
     fn eval_count(&mut self, args: &[Expr]) -> FyrResult<Flow> {
         if args.len() != 2 {
             return Err(runtime_error("count expects exactly two arguments"));
@@ -585,6 +766,7 @@ impl Evaluator {
 
         match (collection, needle) {
             (Value::Array(values), needle) => {
+                ensure_array_item_matches(&values, &needle, "count")?;
                 let mut count = 0;
                 for value in &values {
                     if values_equal(value, &needle)? {
@@ -628,6 +810,7 @@ impl Evaluator {
 
         match (collection, needle) {
             (Value::Array(values), needle) => {
+                ensure_array_item_matches(&values, &needle, "find")?;
                 for (index, value) in values.iter().enumerate() {
                     if values_equal(value, &needle)? {
                         return Ok(Flow::Value(Value::Int(index as i64)));
@@ -679,14 +862,28 @@ impl Evaluator {
                 .and_then(|index| values.get(index).cloned())
             {
                 Some(value) => Ok(Flow::Value(value)),
-                None => self.eval_expr_flow(&args[2]),
+                None => {
+                    let fallback = match self.eval_expr_flow(&args[2])? {
+                        Flow::Value(value) => value,
+                        flow => return Ok(flow),
+                    };
+                    ensure_array_fallback_matches(&values, &fallback, "get default")?;
+                    Ok(Flow::Value(fallback))
+                }
             },
             Value::Str(value) => match usize::try_from(index)
                 .ok()
                 .and_then(|index| value.chars().nth(index))
             {
                 Some(ch) => Ok(Flow::Value(Value::Str(ch.to_string()))),
-                None => self.eval_expr_flow(&args[2]),
+                None => match self.eval_expr_flow(&args[2])? {
+                    Flow::Value(Value::Str(value)) => Ok(Flow::Value(Value::Str(value))),
+                    Flow::Value(other) => Err(runtime_error(format!(
+                        "get default expected str, found {}",
+                        format_value_type(&other)
+                    ))),
+                    flow => Ok(flow),
+                },
             },
             other => Err(runtime_error(format!(
                 "get expects an array or str, found {}",
@@ -731,11 +928,81 @@ impl Evaluator {
 
         match collection {
             Value::Array(mut values) => {
+                ensure_array_item_matches(&values, &value, "append")?;
                 values.push(value);
                 Ok(Flow::Value(Value::Array(values)))
             }
             other => Err(runtime_error(format!(
                 "append expects an array, found {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn eval_reverse(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 1 {
+            return Err(runtime_error("reverse expects exactly one argument"));
+        }
+
+        let value = match self.eval_expr_flow(&args[0])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+
+        match value {
+            Value::Array(mut values) => {
+                ensure_homogeneous_array(&values, "array element")?;
+                values.reverse();
+                Ok(Flow::Value(Value::Array(values)))
+            }
+            Value::Str(value) => Ok(Flow::Value(Value::Str(value.chars().rev().collect()))),
+            other => Err(runtime_error(format!(
+                "reverse expects an array or str, found {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn eval_edge(&mut self, args: &[Expr], edge: Edge) -> FyrResult<Flow> {
+        if args.len() != 2 {
+            return Err(runtime_error(format!(
+                "{} expects exactly two arguments",
+                edge.name()
+            )));
+        }
+
+        let collection = match self.eval_expr_flow(&args[0])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+
+        match collection {
+            Value::Array(values) => match edge.array_value(&values) {
+                Some(value) => Ok(Flow::Value(value)),
+                None => {
+                    let fallback = match self.eval_expr_flow(&args[1])? {
+                        Flow::Value(value) => value,
+                        flow => return Ok(flow),
+                    };
+                    ensure_array_fallback_matches(&values, &fallback, edge.default_context())?;
+                    Ok(Flow::Value(fallback))
+                }
+            },
+            Value::Str(value) => match edge.string_value(&value) {
+                Some(value) => Ok(Flow::Value(Value::Str(value.to_string()))),
+                None => match self.eval_expr_flow(&args[1])? {
+                    Flow::Value(Value::Str(value)) => Ok(Flow::Value(Value::Str(value))),
+                    Flow::Value(other) => Err(runtime_error(format!(
+                        "{} default expected str, found {}",
+                        edge.name(),
+                        format_value_type(&other)
+                    ))),
+                    flow => Ok(flow),
+                },
+            },
+            other => Err(runtime_error(format!(
+                "{} expects an array or str, found {}",
+                edge.name(),
                 other.type_name()
             ))),
         }
@@ -804,6 +1071,7 @@ impl Evaluator {
 
         match (collection, needle) {
             (Value::Array(values), needle) => {
+                ensure_array_item_matches(&values, &needle, "contains")?;
                 for value in &values {
                     if values_equal(value, &needle)? {
                         return Ok(Flow::Value(Value::Bool(true)));
@@ -1001,8 +1269,18 @@ impl Evaluator {
             flow => return Ok(flow),
         };
 
-        let Value::Array(values) = iterable else {
-            return type_error("array", &iterable);
+        let values = match iterable {
+            Value::Array(values) => values,
+            Value::Str(value) => value
+                .chars()
+                .map(|ch| Value::Str(ch.to_string()))
+                .collect::<Vec<_>>(),
+            other => {
+                return Err(runtime_error(format!(
+                    "for loop expected an array or str, found {}",
+                    other.type_name()
+                )));
+            }
         };
 
         for value in values {
@@ -1287,6 +1565,116 @@ fn format_array_type(values: &[Value]) -> String {
         format!("[{first_type}]")
     } else {
         "array".to_owned()
+    }
+}
+
+fn ensure_homogeneous_array(values: &[Value], context: &str) -> FyrResult<()> {
+    let Some(expected) = array_element_type(values) else {
+        return Ok(());
+    };
+
+    for value in values {
+        if !value_matches_type(value, &expected) {
+            return Err(runtime_error(format!(
+                "{context} expected {}, found {}",
+                format_type_name(&expected),
+                format_value_type(value)
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_array_concat_matches(left: &[Value], right: &Value) -> FyrResult<()> {
+    let Value::Array(right) = right else {
+        unreachable!("array concatenation only calls this helper for arrays")
+    };
+
+    ensure_homogeneous_array(left, "array element")?;
+    ensure_homogeneous_array(right, "array element")?;
+
+    match (array_element_type(left), array_element_type(right)) {
+        (Some(expected), Some(_)) => {
+            for value in right {
+                if !value_matches_type(value, &expected) {
+                    return Err(runtime_error(format!(
+                        "array element expected {}, found {}",
+                        format_type_name(&expected),
+                        format_value_type(value)
+                    )));
+                }
+            }
+        }
+        (None, Some(expected)) => {
+            for value in left {
+                if !value_matches_type(value, &expected) {
+                    return Err(runtime_error(format!(
+                        "array element expected {}, found {}",
+                        format_type_name(&expected),
+                        format_value_type(value)
+                    )));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn ensure_array_item_matches(values: &[Value], value: &Value, context: &str) -> FyrResult<()> {
+    let Some(expected) = array_element_type(values) else {
+        return Ok(());
+    };
+
+    if value_matches_type(value, &expected) {
+        return Ok(());
+    }
+
+    Err(runtime_error(format!(
+        "{context} expected {}, found {}",
+        format_type_name(&expected),
+        format_value_type(value)
+    )))
+}
+
+fn ensure_array_fallback_matches(values: &[Value], value: &Value, context: &str) -> FyrResult<()> {
+    ensure_array_item_matches(values, value, context)
+}
+
+fn expect_string_array(values: Vec<Value>, context: &str) -> FyrResult<Vec<String>> {
+    let mut strings = Vec::with_capacity(values.len());
+
+    for value in values {
+        match value {
+            Value::Str(value) => strings.push(value),
+            other => {
+                return Err(runtime_error(format!(
+                    "{context} expected [str], found {}",
+                    format_value_type(&Value::Array(vec![other]))
+                )));
+            }
+        }
+    }
+
+    Ok(strings)
+}
+
+fn array_element_type(values: &[Value]) -> Option<TypeName> {
+    values
+        .iter()
+        .map(infer_value_type)
+        .find(|ty| !type_has_infer(ty))
+}
+
+fn type_has_infer(ty: &TypeName) -> bool {
+    match ty {
+        TypeName::Infer => true,
+        TypeName::Array(element) => type_has_infer(element),
+        TypeName::I64 | TypeName::Bool | TypeName::Str | TypeName::Unit | TypeName::Struct(_) => {
+            false
+        }
     }
 }
 
@@ -2000,6 +2388,42 @@ total
     }
 
     #[test]
+    fn supports_string_indexing() {
+        let result = run(r#"
+let name = "Fyr"
+assert(name[0] == "F")
+assert(name[1] == "y")
+assert(name[2] == "r")
+"#)
+        .expect("string indexing should run");
+
+        assert_eq!(result.last_value, Value::Unit);
+    }
+
+    #[test]
+    fn supports_string_standard_library() {
+        let result = run(r#"
+let phrase = "  Fast Secure Simple  "
+let trimmed = trim(phrase)
+let words = split(lower(trimmed), " ")
+let joined = join(words, "-")
+
+assert(trimmed == "Fast Secure Simple")
+assert(lower("FYR") == "fyr")
+assert(upper("fyr") == "FYR")
+assert(starts_with(trimmed, "Fast"))
+assert(ends_with(trimmed, "Simple"))
+assert(replace(trimmed, "Simple", "Readable") == "Fast Secure Readable")
+assert(words == ["fast", "secure", "simple"])
+assert(joined == "fast-secure-simple")
+assert(join([], ",") == "")
+"#)
+        .expect("string standard library should run");
+
+        assert_eq!(result.last_value, Value::Unit);
+    }
+
+    #[test]
     fn evaluates_typed_empty_arrays() {
         let result =
             run("let values: [i64] = []\nlen(values)\n").expect("typed empty array should run");
@@ -2019,6 +2443,38 @@ total
         .expect("for loop should run");
 
         assert_eq!(result.last_value, Value::Int(10));
+    }
+
+    #[test]
+    fn runs_for_loop_over_string() {
+        let result = run(r#"
+var seen = ""
+for ch in "Fyr":
+    seen = seen + ch
+
+seen
+"#)
+        .expect("string for loop should run");
+
+        assert_eq!(result.last_value, Value::Str("Fyr".to_owned()));
+    }
+
+    #[test]
+    fn supports_control_flow_in_string_for_loop() {
+        let result = run(r#"
+var seen = ""
+for ch in "Fyr!":
+    if ch == "y":
+        continue
+    if ch == "!":
+        break
+    seen = seen + ch
+
+seen
+"#)
+        .expect("string for loop control flow should run");
+
+        assert_eq!(result.last_value, Value::Str("Fr".to_owned()));
     }
 
     #[test]
@@ -2249,6 +2705,26 @@ assert(count("Fyr", "") == 0)
     }
 
     #[test]
+    fn supports_reverse_first_and_last_for_arrays_and_strings() {
+        let result = run(r#"
+let values = [3, 5, 8]
+assert(reverse(values) == [8, 5, 3])
+assert(first(values, -1) == 3)
+assert(last(values, -1) == 8)
+assert(first([], 42) == 42)
+assert(last([], 42) == 42)
+assert(reverse("Fyr") == "ryF")
+assert(first("Fyr", "?") == "F")
+assert(last("Fyr", "?") == "r")
+assert(first("", "?") == "?")
+assert(last("", "?") == "?")
+"#)
+        .expect("reverse/first/last should run");
+
+        assert_eq!(result.last_value, Value::Unit);
+    }
+
+    #[test]
     fn rejects_find_runtime_type_errors() {
         let collection = run("find(42, 1)\n").expect_err("find collection should fail");
         assert!(collection.message.contains("find expects an array or str"));
@@ -2309,6 +2785,54 @@ assert(count("Fyr", "") == 0)
         let error = run("contains(\"fyr\", 1)\n").expect_err("contains should fail");
 
         assert!(error.message.contains("contains(str, value) expected str"));
+    }
+
+    #[test]
+    fn rejects_array_runtime_element_mismatches() {
+        let literal = run("[1, true]\n").expect_err("mixed array literal should fail");
+        assert!(literal.message.contains("array element expected i64"));
+
+        let nested = run("[[1], [true]]\n").expect_err("mixed nested array should fail");
+        assert!(nested.message.contains("array element expected [i64]"));
+
+        let concat = run("[1] + [true]\n").expect_err("mixed concat should fail");
+        assert!(concat.message.contains("array element expected i64"));
+
+        let append = run("append([1], true)\n").expect_err("mixed append should fail");
+        assert!(append.message.contains("append expected i64"));
+
+        let contains = run("contains([1], true)\n").expect_err("mixed contains should fail");
+        assert!(contains.message.contains("contains expected i64"));
+
+        let find = run("find([1], true)\n").expect_err("mixed find should fail");
+        assert!(find.message.contains("find expected i64"));
+
+        let count = run("count([1], true)\n").expect_err("mixed count should fail");
+        assert!(count.message.contains("count expected i64"));
+
+        let fallback = run("get([1], 3, true)\n").expect_err("mixed get fallback should fail");
+        assert!(fallback.message.contains("get default expected i64"));
+    }
+
+    #[test]
+    fn rejects_reverse_first_and_last_runtime_type_errors() {
+        let reverse = run("reverse(42)\n").expect_err("reverse collection should fail");
+        assert!(reverse.message.contains("reverse expects an array or str"));
+
+        let first = run("first(42, 0)\n").expect_err("first collection should fail");
+        assert!(first.message.contains("first expects an array or str"));
+
+        let last = run("last(42, 0)\n").expect_err("last collection should fail");
+        assert!(last.message.contains("last expects an array or str"));
+
+        let first_default = run("first(\"\", 0)\n").expect_err("first default should fail");
+        assert!(first_default.message.contains("first default expected str"));
+
+        let last_default = run("last(\"\", 0)\n").expect_err("last default should fail");
+        assert!(last_default.message.contains("last default expected str"));
+
+        let get_default = run("get(\"Fyr\", 9, 0)\n").expect_err("get default should fail");
+        assert!(get_default.message.contains("get default expected str"));
     }
 
     #[test]
@@ -2419,5 +2943,55 @@ append(third, 21)
         let error = run("[1, 2][2]\n").expect_err("out-of-bounds index should fail");
 
         assert!(error.message.contains("out of bounds"));
+    }
+
+    #[test]
+    fn rejects_string_index_runtime_errors() {
+        let non_integer = run("\"Fyr\"[true]\n").expect_err("string index type should fail");
+        assert!(non_integer.message.contains("string index expected i64"));
+
+        let negative = run("\"Fyr\"[-1]\n").expect_err("negative string index should fail");
+        assert!(negative.message.contains("string index -1 out of bounds"));
+
+        let too_far = run("\"Fyr\"[3]\n").expect_err("oversized string index should fail");
+        assert!(too_far.message.contains("string index 3 out of bounds"));
+
+        let collection = run("42[0]\n").expect_err("indexing primitive should fail");
+        assert!(
+            collection
+                .message
+                .contains("indexing expected an array or str")
+        );
+    }
+
+    #[test]
+    fn rejects_string_standard_library_runtime_errors() {
+        let transform = run("trim(42)\n").expect_err("trim type should fail");
+        assert!(transform.message.contains("trim expected str"));
+
+        let predicate =
+            run("starts_with(\"Fyr\", 1)\n").expect_err("starts_with value should fail");
+        assert!(predicate.message.contains("starts_with value expected str"));
+
+        let join_collection = run("join(42, \",\")\n").expect_err("join collection should fail");
+        assert!(join_collection.message.contains("join expects [str]"));
+
+        let join_item = run("join([1], \",\")\n").expect_err("join item should fail");
+        assert!(join_item.message.contains("join expected [str]"));
+
+        let split_empty = run("split(\"Fyr\", \"\")\n").expect_err("split separator should fail");
+        assert!(
+            split_empty
+                .message
+                .contains("split separator must not be empty")
+        );
+
+        let replace_empty =
+            run("replace(\"Fyr\", \"\", \"-\")\n").expect_err("replace old should fail");
+        assert!(
+            replace_empty
+                .message
+                .contains("replace old value must not be empty")
+        );
     }
 }

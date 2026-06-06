@@ -8,7 +8,7 @@ The long-term goal is direct:
 - secure like Rust
 - simple like Python
 
-This repository begins with a working bootstrap: a Rust implementation of the `fyr` command, a tiny parser/evaluator, `fyr run`, `fyr check`, and a terminal REPL.
+This repository begins with a working bootstrap: a Rust implementation of the `fyr` command, a tiny parser/evaluator, `fyr run`, `fyr check`, `fyr fmt`, and a terminal REPL.
 
 ## Try It
 
@@ -20,7 +20,9 @@ cargo run -p fyr -- run examples/control.fyr
 cargo run -p fyr -- run examples/point.fyr
 cargo run -p fyr -- run examples/arrays.fyr
 cargo run -p fyr -- run examples/range.fyr
+cargo run -p fyr -- run examples/strings.fyr
 cargo run -p fyr -- check examples
+cargo run -p fyr -- fmt --check examples
 cargo run -p fyr -- test examples
 cargo run -p fyr
 ```
@@ -39,11 +41,14 @@ Then it can run from any path:
 fyr doctor
 fyr run /absolute/path/to/file.fyr
 fyr check /absolute/path/to/file-or-dir
+fyr fmt --check /absolute/path/to/file-or-dir
+fyr fmt /absolute/path/to/file-or-dir
 fyr test /absolute/path/to/test-file-or-dir
 fyr
 ```
 
 Directory inputs are searched recursively for `.fyr` files.
+The bootstrap formatter writes files in place by default and checks without writing when passed `--check`; it preserves line comments while canonicalizing spacing, indentation, and expression layout.
 
 Inside the REPL:
 
@@ -52,6 +57,18 @@ let answer = 40 + 2
 answer
 print("Fyr is alive")
 ```
+
+The REPL keeps accepted bindings and declarations alive between submissions. It also has terminal commands for exploration:
+
+```text
+:help
+:load /absolute/path/to/file.fyr
+:history
+:reset
+:quit
+```
+
+`:load` runs a Fyr source file inside the current session, which makes it useful for loading helpers and then experimenting with them interactively. Submitted chunks and loaded files predeclare their top-level functions before evaluating other statements, matching normal source-file behavior.
 
 Functions use typed signatures and Python-style indented bodies:
 
@@ -130,14 +147,45 @@ let middle_values = slice(more_values, 1, 4)
 let safe_missing = get(more_values, 99, -1)
 let found_index = find(more_values, 13)
 let value_count = count(more_values, 13)
+let reversed_values = reverse(more_values)
+let first_value = first(more_values, -1)
+let last_value = last(more_values, -1)
 let empty: [i64] = []
 print(sum(more_values))
 print(middle_values)
 print(safe_missing)
 print(found_index)
 print(value_count)
+print(reversed_values)
+print(first_value)
+print(last_value)
 print(len(empty))
 print(is_empty(empty))
+```
+
+Strings are indexed and iterable by character:
+
+```fyr
+fn rebuild(text: str) -> str:
+    var rebuilt = ""
+    for ch in text:
+        rebuilt = rebuilt + ch
+    return rebuilt
+
+let name = "Fyr"
+let phrase = "  Fast Secure Simple  "
+let cleaned = trim(phrase)
+let words = split(lower(cleaned), " ")
+print(name[0])
+print(name[1])
+print(name[2])
+print(rebuild(name))
+print(cleaned)
+print(join(words, "-"))
+print(upper(name))
+print(starts_with(cleaned, "Fast"))
+print(ends_with(cleaned, "Simple"))
+print(replace(cleaned, "Simple", "Readable"))
 ```
 
 Use `range` for counted loops:
@@ -165,13 +213,29 @@ assert(is_empty([]))
 assert(append([3, 5, 8], 13) == [3, 5, 8, 13])
 assert(slice([3, 5, 8, 13], 1, 3) == [5, 8])
 assert(get([3, 5, 8], 99, -1) == -1)
+assert(reverse([3, 5, 8]) == [8, 5, 3])
+assert(first([3, 5, 8], -1) == 3)
+assert(last([3, 5, 8], -1) == 8)
 assert(find([3, 5, 8], 8) == 2)
 assert(count([3, 5, 3, 8, 3], 3) == 3)
 assert(contains([3, 5, 8, 13], 8))
 assert(not contains([3, 5, 8, 13], 21) and contains([3, 5, 8, 13], 8))
 assert(contains("secure Fyr", "Fyr"))
+assert("Fyr"[0] == "F")
+assert("Fyr"[1] == "y")
+assert(trim("  Fyr  ") == "Fyr")
+assert(lower("FYR") == "fyr")
+assert(upper("fyr") == "FYR")
+assert(starts_with("Fyr", "F"))
+assert(ends_with("Fyr", "r"))
+assert(replace("Fast C", "C", "Fyr") == "Fast Fyr")
+assert(split("fast secure simple", " ") == ["fast", "secure", "simple"])
+assert(join(["fast", "secure", "simple"], "-") == "fast-secure-simple")
 assert(slice("secure Fyr", 0, 6) == "secure")
 assert(get("Fyr", 1, "?") == "y")
+assert(reverse("Fyr") == "ryF")
+assert(first("Fyr", "?") == "F")
+assert(last("Fyr", "?") == "r")
 assert(find("secure Fyr", "Fyr") == 7)
 assert(count("secure Fyr secure", "secure") == 2)
 assert(is_empty(""))
@@ -200,12 +264,15 @@ The bootstrap supports:
 - recursive function calls and local function declarations after the declaration point
 - checked function calls and return types
 - statement-style `if` / `elif` / `else` blocks and value-producing `if` / `elif` / `else` branches
-- `while` loops and array `for value in values` loops
+- `while` loops plus array and string `for value in values` loops
 - `return`, `break`, and `continue`
 - `struct` declarations, struct literals, and field access
-- homogeneous array literals, `[T]` annotations, typed empty arrays, append, concatenation with `+`, checked indexing, fallback reads, checked slicing, search/count helpers, emptiness checks, and `len(array)`
-- built-in `print(value)`, `type(value)`, `len(value)`, `is_empty(value)`, `get(value, index, default)`, `find(value, item)`, `count(value, item)`, `append(array, value)`, `contains(value, item)`, `slice(value, start, end)`, end-exclusive `range(...)`, and `assert(...)`
-- `fyr test <file>` assertion-file execution
+- homogeneous array literals, `[T]` annotations, typed empty arrays, append, reverse, first/last reads, concatenation with `+`, checked indexing, fallback reads, checked slicing, search/count helpers, emptiness checks, and `len(array)`
+- checked string indexing, character iteration, concatenation, containment, slicing, fallback reads, search/count helpers, split/join helpers, trim/case helpers, prefix/suffix checks, replacement, reverse, first/last reads, emptiness checks, and `len(str)`
+- built-in `print(value)`, `type(value)`, `len(value)`, `is_empty(value)`, `get(value, index, default)`, `first(value, default)`, `last(value, default)`, `reverse(value)`, `find(value, item)`, `count(value, item)`, `append(array, value)`, `contains(value, item)`, `slice(value, start, end)`, `split(text, separator)`, `join(parts, separator)`, `trim(text)`, `lower(text)`, `upper(text)`, `starts_with(text, prefix)`, `ends_with(text, suffix)`, `replace(text, old, new)`, end-exclusive `range(...)`, and `assert(...)`
+- a persistent terminal REPL with `:help`, `:load <file>`, `:history`, `:reset`, and `:quit`
+- `fyr fmt <path...>` in-place formatting and `fyr fmt --check <path...>` formatting checks
+- `fyr test <path...>` assertion-file execution
 - one-statement-per-line scripts
 
 The bootstrap typechecker enforces `i64`, `bool`, `str`, `unit`, struct, and array types across function calls, return values, branch expressions, assignments, equality, indexing, and supported operators. Runtime integer arithmetic fails on overflow, division by zero, and remainder by zero instead of wrapping.

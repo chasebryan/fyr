@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod diagnostic;
 pub mod eval;
+pub mod format;
 pub mod lexer;
 pub mod parser;
 pub mod repl;
@@ -9,6 +10,7 @@ pub mod typecheck;
 
 pub use diagnostic::{FyrError, FyrResult};
 pub use eval::{RunResult, Value};
+pub use format::format_source;
 
 pub fn check_source(source: &str) -> FyrResult<()> {
     let tokens = lexer::lex(source)?;

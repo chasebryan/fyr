@@ -1,0 +1,23 @@
+# Strings as indexable, iterable text with standard helpers.
+fn rebuild(text: str) -> str:
+    var rebuilt = ""
+    for ch in text:
+        rebuilt = rebuilt + ch
+    return rebuilt
+let name = "Fyr"
+let phrase = "  Fast Secure Simple  "
+let cleaned = trim(phrase)
+let words = split(lower(cleaned), " ")
+print(name[0])
+print(name[1])
+print(name[2])
+print(rebuild(name))
+print(reverse(name))
+print(first(name, "?"))
+print(last(name, "?"))
+print(cleaned)
+print(join(words, "-"))
+print(upper(name))
+print(starts_with(cleaned, "Fast"))
+print(ends_with(cleaned, "Simple"))
+print(replace(cleaned, "Simple", "Readable"))

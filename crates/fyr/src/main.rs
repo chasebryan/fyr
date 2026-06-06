@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use fyr::{check_source, repl, run_source};
+use fyr::{check_source, format_source, repl, run_source};
 
 fn main() -> ExitCode {
     match run_cli() {
@@ -35,6 +35,7 @@ fn run_cli() -> Result<(), String> {
             Ok(())
         }
         [_, command, paths @ ..] if command == "check" => check_files(paths),
+        [_, command, args @ ..] if command == "fmt" => fmt_files(args),
         [_, command, path] if command == "run" => {
             let source = read_source(path)?;
             let result = run_source(&source).map_err(|error| error.to_string())?;
@@ -80,6 +81,42 @@ fn test_files(paths: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn fmt_files(args: &[String]) -> Result<(), String> {
+    let (check, paths) = parse_fmt_args(args)?;
+    let files = collect_source_paths(paths, "fmt")?;
+    let mut unformatted = Vec::new();
+
+    for path in files {
+        let source = read_source_path(&path)?;
+        let formatted = format_source(&source).map_err(|error| error.to_string())?;
+
+        if source == formatted {
+            println!("{}: ok", path.display());
+        } else if check {
+            println!("{}: needs fmt", path.display());
+            unformatted.push(path);
+        } else {
+            fs::write(&path, formatted)
+                .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+            println!("{}: formatted", path.display());
+        }
+    }
+
+    if check && !unformatted.is_empty() {
+        return Err(format!("{} file(s) need formatting", unformatted.len()));
+    }
+
+    Ok(())
+}
+
+fn parse_fmt_args(args: &[String]) -> Result<(bool, &[String]), String> {
+    match args {
+        [flag, paths @ ..] if flag == "--check" || flag == "-c" => Ok((true, paths)),
+        [flag, ..] if flag.starts_with('-') => Err(format!("unknown fyr fmt option '{flag}'")),
+        paths => Ok((false, paths)),
+    }
 }
 
 fn collect_source_paths(paths: &[String], command: &str) -> Result<Vec<PathBuf>, String> {
@@ -151,9 +188,18 @@ fn print_help() {
     println!("  fyr repl         Start the REPL");
     println!("  fyr run <file>   Run a Fyr source file");
     println!("  fyr check <path...> Parse-check Fyr files or directories");
+    println!("  fyr fmt <path...>   Format Fyr files or directories in place");
+    println!("  fyr fmt --check <path...> Check Fyr formatting without writing");
     println!("  fyr test <path...>  Run Fyr assertion files or directories");
     println!("  fyr doctor       Show command/install diagnostics");
     println!("  fyr version      Print the Fyr version");
+    println!();
+    println!("REPL commands:");
+    println!("  :help            Show REPL help");
+    println!("  :load <file>     Run a Fyr file in the current REPL session");
+    println!("  :history         Show accepted REPL source");
+    println!("  :reset           Clear REPL bindings and history");
+    println!("  :quit            Exit the REPL");
 }
 
 fn print_doctor() -> Result<(), String> {

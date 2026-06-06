@@ -339,12 +339,12 @@ impl Checker {
             }
         }
 
-        if let Some(expected_element) = expected_element {
-            if element_type != *expected_element {
-                return Err(type_error(format!(
-                    "array element expected {expected_element}, found {element_type}"
-                )));
-            }
+        if let Some(expected_element) = expected_element
+            && element_type != *expected_element
+        {
+            return Err(type_error(format!(
+                "array element expected {expected_element}, found {element_type}"
+            )));
         }
 
         Ok(Type::Array(Box::new(element_type)))
@@ -352,20 +352,29 @@ impl Checker {
 
     fn check_index(&mut self, collection: &Expr, index: &Expr) -> FyrResult<Type> {
         let collection_type = self.check_expr(collection)?;
-        let Type::Array(element_type) = collection_type else {
-            return Err(type_error(format!(
-                "indexing expected an array, found {collection_type}"
-            )));
-        };
-
-        let index_type = self.check_expr(index)?;
-        if index_type != Type::I64 {
-            return Err(type_error(format!(
-                "array index expected i64, found {index_type}"
-            )));
+        match collection_type {
+            Type::Array(element_type) => {
+                let index_type = self.check_expr(index)?;
+                if index_type != Type::I64 {
+                    return Err(type_error(format!(
+                        "array index expected i64, found {index_type}"
+                    )));
+                }
+                Ok(*element_type)
+            }
+            Type::Str => {
+                let index_type = self.check_expr(index)?;
+                if index_type != Type::I64 {
+                    return Err(type_error(format!(
+                        "string index expected i64, found {index_type}"
+                    )));
+                }
+                Ok(Type::Str)
+            }
+            found => Err(type_error(format!(
+                "indexing expected an array or str, found {found}"
+            ))),
         }
-
-        Ok(*element_type)
     }
 
     fn check_struct_init(&mut self, name: &str, fields: &[(String, Expr)]) -> FyrResult<Type> {
@@ -786,12 +795,12 @@ impl Checker {
                         _ => None,
                     };
                     let found = self.check_expr_with_hint(&args[1], expected_element)?;
-                    if let Some(expected_element) = expected_element {
-                        if found != *expected_element {
-                            return Err(type_error(format!(
-                                "append expected {expected_element}, found {found}"
-                            )));
-                        }
+                    if let Some(expected_element) = expected_element
+                        && found != *expected_element
+                    {
+                        return Err(type_error(format!(
+                            "append expected {expected_element}, found {found}"
+                        )));
                     }
                     return Ok(Type::Array(Box::new(found)));
                 }
@@ -812,6 +821,41 @@ impl Checker {
 
                 Ok(Type::Array(element))
             }
+            "reverse" => {
+                if args.len() != 1 {
+                    return Err(type_error("reverse expects exactly one argument"));
+                }
+
+                if is_empty_array_literal(&args[0]) {
+                    let Some(Type::Array(element)) = expected else {
+                        return Err(type_error(
+                            "reverse needs an expected array type for empty array literals",
+                        ));
+                    };
+                    let expected_array = Type::Array(element.clone());
+                    self.check_expr_with_hint(&args[0], Some(&expected_array))?;
+                    return Ok(expected_array);
+                }
+
+                let hint = match expected {
+                    Some(Type::Array(_)) | Some(Type::Str) => expected,
+                    _ => None,
+                };
+                let collection_type = self.check_expr_with_hint(&args[0], hint)?;
+                match collection_type {
+                    Type::Array(_) | Type::Str => Ok(collection_type),
+                    found => Err(type_error(format!(
+                        "reverse expects an array or str, found {found}"
+                    ))),
+                }
+            }
+            "first" => self.check_edge_call("first", args, expected),
+            "last" => self.check_edge_call("last", args, expected),
+            "trim" | "lower" | "upper" => self.check_string_unary(callee, args),
+            "starts_with" | "ends_with" => self.check_string_predicate(callee, args),
+            "replace" => self.check_replace(args),
+            "split" => self.check_split(args),
+            "join" => self.check_join(args),
             "slice" => {
                 if args.len() != 3 {
                     return Err(type_error("slice expects exactly three arguments"));
@@ -883,6 +927,109 @@ impl Checker {
 
                 Ok(*return_type)
             }
+        }
+    }
+
+    fn check_string_unary(&mut self, name: &str, args: &[Expr]) -> FyrResult<Type> {
+        if args.len() != 1 {
+            return Err(type_error(format!("{name} expects exactly one argument")));
+        }
+
+        self.check_string_arg(&args[0], name)?;
+        Ok(Type::Str)
+    }
+
+    fn check_string_predicate(&mut self, name: &str, args: &[Expr]) -> FyrResult<Type> {
+        if args.len() != 2 {
+            return Err(type_error(format!("{name} expects exactly two arguments")));
+        }
+
+        self.check_string_arg(&args[0], name)?;
+        self.check_string_arg(&args[1], &format!("{name} value"))?;
+        Ok(Type::Bool)
+    }
+
+    fn check_replace(&mut self, args: &[Expr]) -> FyrResult<Type> {
+        if args.len() != 3 {
+            return Err(type_error("replace expects exactly three arguments"));
+        }
+
+        self.check_string_arg(&args[0], "replace")?;
+        self.check_string_arg(&args[1], "replace old")?;
+        self.check_string_arg(&args[2], "replace new")?;
+        Ok(Type::Str)
+    }
+
+    fn check_split(&mut self, args: &[Expr]) -> FyrResult<Type> {
+        if args.len() != 2 {
+            return Err(type_error("split expects exactly two arguments"));
+        }
+
+        self.check_string_arg(&args[0], "split")?;
+        self.check_string_arg(&args[1], "split separator")?;
+        Ok(Type::Array(Box::new(Type::Str)))
+    }
+
+    fn check_join(&mut self, args: &[Expr]) -> FyrResult<Type> {
+        if args.len() != 2 {
+            return Err(type_error("join expects exactly two arguments"));
+        }
+
+        if !is_empty_array_literal(&args[0]) {
+            match self.check_expr(&args[0])? {
+                Type::Array(element) if *element == Type::Str => {}
+                found => return Err(type_error(format!("join expects [str], found {found}"))),
+            }
+        }
+
+        self.check_string_arg(&args[1], "join separator")?;
+        Ok(Type::Str)
+    }
+
+    fn check_string_arg(&mut self, arg: &Expr, context: &str) -> FyrResult<()> {
+        let found = self.check_expr(arg)?;
+        if found != Type::Str {
+            return Err(type_error(format!("{context} expected str, found {found}")));
+        }
+        Ok(())
+    }
+
+    fn check_edge_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        expected: Option<&Type>,
+    ) -> FyrResult<Type> {
+        if args.len() != 2 {
+            return Err(type_error(format!("{name} expects exactly two arguments")));
+        }
+
+        if is_empty_array_literal(&args[0]) {
+            return self.check_expr_with_hint(&args[1], expected);
+        }
+
+        match self.check_expr(&args[0])? {
+            Type::Array(element) => {
+                let found = self.check_expr_with_hint(&args[1], Some(&element))?;
+                if found != *element {
+                    return Err(type_error(format!(
+                        "{name} default expected {element}, found {found}"
+                    )));
+                }
+                Ok(*element)
+            }
+            Type::Str => {
+                let found = self.check_expr(&args[1])?;
+                if found != Type::Str {
+                    return Err(type_error(format!(
+                        "{name} default expected str, found {found}"
+                    )));
+                }
+                Ok(Type::Str)
+            }
+            found => Err(type_error(format!(
+                "{name} expects an array or str, found {found}"
+            ))),
         }
     }
 
@@ -959,15 +1106,19 @@ impl Checker {
 
     fn check_for(&mut self, name: &str, iterable: &Expr, body: &[Statement]) -> FyrResult<()> {
         let iterable_type = self.check_expr(iterable)?;
-        let Type::Array(element_type) = iterable_type else {
-            return Err(type_error(format!(
-                "for loop expected an array, found {iterable_type}"
-            )));
+        let element_type = match iterable_type {
+            Type::Array(element_type) => *element_type,
+            Type::Str => Type::Str,
+            found => {
+                return Err(type_error(format!(
+                    "for loop expected an array or str, found {found}"
+                )));
+            }
         };
 
         self.loop_depth += 1;
         self.push_scope();
-        self.define(name, *element_type, false)?;
+        self.define(name, element_type, false)?;
         let result = self.check_block(body);
         self.pop_scope();
         self.loop_depth -= 1;
@@ -1580,6 +1731,45 @@ sum(values)
     }
 
     #[test]
+    fn accepts_string_indexing() {
+        typecheck(
+            r#"
+let name = "Fyr"
+let first: str = name[0]
+let second: str = "Fyr"[1]
+assert(first == "F")
+assert(second == "y")
+"#,
+        )
+        .expect("string indexing should typecheck");
+    }
+
+    #[test]
+    fn accepts_string_standard_library() {
+        typecheck(
+            r#"
+let phrase = "  Fast Secure Simple  "
+let trimmed: str = trim(phrase)
+let lowered: str = lower(trimmed)
+let uppered: str = upper(lowered)
+let parts: [str] = split(lowered, " ")
+let joined: str = join(parts, "-")
+let empty_join: str = join([], ",")
+let replaced: str = replace(trimmed, "Simple", "Readable")
+let starts: bool = starts_with(trimmed, "Fast")
+let ends: bool = ends_with(trimmed, "Simple")
+assert(len(parts) == 3)
+assert(joined == "fast-secure-simple")
+assert(empty_join == "")
+assert(replaced == "Fast Secure Readable")
+assert(starts and ends)
+assert(uppered == "FAST SECURE SIMPLE")
+"#,
+        )
+        .expect("string standard library should typecheck");
+    }
+
+    #[test]
     fn accepts_annotated_bindings_and_empty_arrays() {
         typecheck(
             r#"
@@ -1613,6 +1803,21 @@ sum([1, 2, 3])
 "#,
         )
         .expect("for loop should typecheck");
+    }
+
+    #[test]
+    fn accepts_for_loop_over_strings() {
+        typecheck(
+            r#"
+var seen = ""
+for ch in "Fyr":
+    let checked: str = ch
+    seen = seen + checked
+
+assert(seen == "Fyr")
+"#,
+        )
+        .expect("string for loop should typecheck");
     }
 
     #[test]
@@ -1824,6 +2029,39 @@ assert(letter == "y")
     }
 
     #[test]
+    fn accepts_reverse_first_and_last_for_arrays_and_strings() {
+        typecheck(
+            r#"
+let values = [3, 5, 8]
+let reversed: [i64] = reverse(values)
+let reversed_empty: [i64] = reverse([])
+let first_value: i64 = first(values, -1)
+let last_value: i64 = last(values, -1)
+let inferred_first = first([], 42)
+let inferred_last = last([], 42)
+let rows = [[1, 2]]
+let first_row: [i64] = first(rows, [])
+let fallback_row: [i64] = first([], [])
+let reversed_text: str = reverse("Fyr")
+let first_letter: str = first("Fyr", "?")
+let last_letter: str = last("Fyr", "?")
+assert(reversed == [8, 5, 3])
+assert(len(reversed_empty) == 0)
+assert(first_value == 3)
+assert(last_value == 8)
+assert(inferred_first == 42)
+assert(inferred_last == 42)
+assert(first_row == [1, 2])
+assert(len(fallback_row) == 0)
+assert(reversed_text == "ryF")
+assert(first_letter == "F")
+assert(last_letter == "r")
+"#,
+        )
+        .expect("reverse/first/last should typecheck");
+    }
+
+    #[test]
     fn accepts_find_for_arrays_and_strings() {
         typecheck(
             r#"
@@ -1975,6 +2213,62 @@ assert(len(fallback) == 0)
             error
                 .message
                 .contains("get expects exactly three arguments")
+        );
+    }
+
+    #[test]
+    fn rejects_reverse_type_errors() {
+        let collection = typecheck("reverse(42)\n").expect_err("reverse collection should fail");
+        assert!(
+            collection
+                .message
+                .contains("reverse expects an array or str")
+        );
+
+        let empty = typecheck("reverse([])\n").expect_err("reverse empty array should fail");
+        assert!(
+            empty
+                .message
+                .contains("reverse needs an expected array type")
+        );
+
+        let arity = typecheck("reverse([1], [2])\n").expect_err("reverse arity should fail");
+        assert!(
+            arity
+                .message
+                .contains("reverse expects exactly one argument")
+        );
+    }
+
+    #[test]
+    fn rejects_first_and_last_type_errors() {
+        let first_collection =
+            typecheck("first(42, 0)\n").expect_err("first collection should fail");
+        assert!(
+            first_collection
+                .message
+                .contains("first expects an array or str")
+        );
+
+        let last_collection = typecheck("last(42, 0)\n").expect_err("last collection should fail");
+        assert!(
+            last_collection
+                .message
+                .contains("last expects an array or str")
+        );
+
+        let first_default =
+            typecheck("first([1, 2, 3], true)\n").expect_err("first default should fail");
+        assert!(first_default.message.contains("first default expected i64"));
+
+        let last_default = typecheck("last(\"Fyr\", 0)\n").expect_err("last default should fail");
+        assert!(last_default.message.contains("last default expected str"));
+
+        let arity = typecheck("first([1, 2, 3])\n").expect_err("first arity should fail");
+        assert!(
+            arity
+                .message
+                .contains("first expects exactly two arguments")
         );
     }
 
@@ -2168,6 +2462,51 @@ assert(len(nested[0]) == 0)
             .expect_err("non-integer index should fail");
 
         assert!(error.message.contains("array index expected i64"));
+    }
+
+    #[test]
+    fn rejects_invalid_string_indexing() {
+        let index = typecheck("\"Fyr\"[true]\n").expect_err("string index should fail");
+        assert!(index.message.contains("string index expected i64"));
+
+        let collection = typecheck("42[0]\n").expect_err("primitive indexing should fail");
+        assert!(
+            collection
+                .message
+                .contains("indexing expected an array or str")
+        );
+    }
+
+    #[test]
+    fn rejects_string_standard_library_type_errors() {
+        let transform = typecheck("trim(42)\n").expect_err("trim type should fail");
+        assert!(transform.message.contains("trim expected str"));
+
+        let predicate =
+            typecheck("starts_with(\"Fyr\", 1)\n").expect_err("starts_with type should fail");
+        assert!(predicate.message.contains("starts_with value expected str"));
+
+        let replace =
+            typecheck("replace(\"Fyr\", \"y\", 1)\n").expect_err("replace new type should fail");
+        assert!(replace.message.contains("replace new expected str"));
+
+        let split = typecheck("split(\"Fyr\", 1)\n").expect_err("split separator should fail");
+        assert!(split.message.contains("split separator expected str"));
+
+        let join_collection =
+            typecheck("join(42, \",\")\n").expect_err("join collection type should fail");
+        assert!(join_collection.message.contains("join expects [str]"));
+
+        let join_element =
+            typecheck("join([1], \",\")\n").expect_err("join element type should fail");
+        assert!(join_element.message.contains("join expects [str]"));
+
+        let arity = typecheck("split(\"Fyr\")\n").expect_err("split arity should fail");
+        assert!(
+            arity
+                .message
+                .contains("split expects exactly two arguments")
+        );
     }
 
     #[test]

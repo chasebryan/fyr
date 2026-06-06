@@ -15,6 +15,18 @@ let answer = 40 + 2
 answer
 ```
 
+Accepted bindings stay available until the session is reset or closed. The REPL also has commands:
+
+```text
+:help
+:load examples/hello.fyr
+:history
+:reset
+:quit
+```
+
+`:load` runs a Fyr file in the current session, so you can load helpers and then keep experimenting. Top-level functions are predeclared inside each submitted chunk, matching normal source-file behavior.
+
 Fyr functions use typed signatures and indented bodies:
 
 ```fyr
@@ -104,14 +116,45 @@ let middle_values = slice(more_values, 1, 4)
 let safe_missing = get(more_values, 99, -1)
 let found_index = find(more_values, 13)
 let value_count = count(more_values, 13)
+let reversed_values = reverse(more_values)
+let first_value = first(more_values, -1)
+let last_value = last(more_values, -1)
 let empty: [i64] = []
 print(sum(more_values))
 print(middle_values)
 print(safe_missing)
 print(found_index)
 print(value_count)
+print(reversed_values)
+print(first_value)
+print(last_value)
 print(len(empty))
 print(is_empty(empty))
+```
+
+Strings are indexed and iterable by character:
+
+```fyr
+fn rebuild(text: str) -> str:
+    var rebuilt = ""
+    for ch in text:
+        rebuilt = rebuilt + ch
+    return rebuilt
+
+let name = "Fyr"
+let phrase = "  Fast Secure Simple  "
+let cleaned = trim(phrase)
+let words = split(lower(cleaned), " ")
+print(name[0])
+print(name[1])
+print(name[2])
+print(rebuild(name))
+print(cleaned)
+print(join(words, "-"))
+print(upper(name))
+print(starts_with(cleaned, "Fast"))
+print(ends_with(cleaned, "Simple"))
+print(replace(cleaned, "Simple", "Readable"))
 ```
 
 For counted loops, use `range`. The end is not included:
@@ -140,12 +183,28 @@ assert(is_empty([]))
 assert(append([3, 5, 8], 13) == [3, 5, 8, 13])
 assert(slice([3, 5, 8, 13], 1, 3) == [5, 8])
 assert(get([3, 5, 8], 99, -1) == -1)
+assert(reverse([3, 5, 8]) == [8, 5, 3])
+assert(first([3, 5, 8], -1) == 3)
+assert(last([3, 5, 8], -1) == 8)
 assert(find([3, 5, 8], 8) == 2)
 assert(count([3, 5, 3, 8, 3], 3) == 3)
 assert(not contains([3, 5, 8, 13], 21))
 assert(contains("secure Fyr", "Fyr"))
+assert("Fyr"[0] == "F")
+assert("Fyr"[1] == "y")
+assert(trim("  Fyr  ") == "Fyr")
+assert(lower("FYR") == "fyr")
+assert(upper("fyr") == "FYR")
+assert(starts_with("Fyr", "F"))
+assert(ends_with("Fyr", "r"))
+assert(replace("Fast C", "C", "Fyr") == "Fast Fyr")
+assert(split("fast secure simple", " ") == ["fast", "secure", "simple"])
+assert(join(["fast", "secure", "simple"], "-") == "fast-secure-simple")
 assert(slice("secure Fyr", 0, 6) == "secure")
 assert(get("Fyr", 1, "?") == "y")
+assert(reverse("Fyr") == "ryF")
+assert(first("Fyr", "?") == "F")
+assert(last("Fyr", "?") == "r")
 assert(find("secure Fyr", "Fyr") == 7)
 assert(count("secure Fyr secure", "secure") == 2)
 assert(is_empty(""))
@@ -159,6 +218,13 @@ Run them with:
 fyr test examples
 ```
 
-When `fyr check` or `fyr test` receives a directory, it recursively finds `.fyr` files.
+Format Fyr files with:
+
+```sh
+fyr fmt --check examples
+fyr fmt examples
+```
+
+When `fyr check`, `fyr fmt`, or `fyr test` receives a directory, it recursively finds `.fyr` files. The bootstrap formatter preserves line comments while canonicalizing spacing, indentation, and expression layout.
 
 The bootstrap version of Fyr is intentionally small. Each chapter of this book should track real language behavior as the compiler grows.
