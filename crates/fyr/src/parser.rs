@@ -246,14 +246,7 @@ impl<'a> Parser<'a> {
         let condition = self.or()?;
         self.consume(&TokenKind::Colon, "expected ':' after if condition")?;
         let then_branch = self.block("if body")?;
-
-        self.skip_newlines();
-        let else_branch = if self.match_kind(&TokenKind::Else) {
-            self.consume(&TokenKind::Colon, "expected ':' after else")?;
-            self.block("else body")?
-        } else {
-            Vec::new()
-        };
+        let else_branch = self.if_statement_tail()?;
 
         Ok(Statement::If {
             condition,
@@ -344,17 +337,57 @@ impl<'a> Parser<'a> {
         let condition = self.or()?;
         self.consume(&TokenKind::Colon, "expected ':' after if condition")?;
         let then_branch = self.block("if body")?;
-
-        self.skip_newlines();
-        self.consume(&TokenKind::Else, "expected 'else' branch for if expression")?;
-        self.consume(&TokenKind::Colon, "expected ':' after else")?;
-        let else_branch = self.block("else body")?;
+        let else_branch = self.if_expression_tail()?;
 
         Ok(Expr::If {
             condition: Box::new(condition),
             then_branch,
             else_branch,
         })
+    }
+
+    fn if_statement_tail(&mut self) -> FyrResult<Vec<Statement>> {
+        self.skip_newlines();
+
+        if self.match_kind(&TokenKind::Elif) {
+            return self.elif_tail(false);
+        }
+
+        if self.match_kind(&TokenKind::Else) {
+            self.consume(&TokenKind::Colon, "expected ':' after else")?;
+            return self.block("else body");
+        }
+
+        Ok(Vec::new())
+    }
+
+    fn if_expression_tail(&mut self) -> FyrResult<Vec<Statement>> {
+        self.skip_newlines();
+
+        if self.match_kind(&TokenKind::Elif) {
+            return self.elif_tail(true);
+        }
+
+        self.consume(&TokenKind::Else, "expected 'else' branch for if expression")?;
+        self.consume(&TokenKind::Colon, "expected ':' after else")?;
+        self.block("else body")
+    }
+
+    fn elif_tail(&mut self, require_else: bool) -> FyrResult<Vec<Statement>> {
+        let condition = self.or()?;
+        self.consume(&TokenKind::Colon, "expected ':' after elif condition")?;
+        let then_branch = self.block("elif body")?;
+        let else_branch = if require_else {
+            self.if_expression_tail()?
+        } else {
+            self.if_statement_tail()?
+        };
+
+        Ok(vec![Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+        }])
     }
 
     fn or(&mut self) -> FyrResult<Expr> {
@@ -824,6 +857,34 @@ if true:
     }
 
     #[test]
+    fn parses_statement_if_with_elif() {
+        let tokens = lex(r#"
+if value < 0:
+    print("negative")
+elif value == 0:
+    print("zero")
+else:
+    print("positive")
+"#)
+        .expect("lexing should pass");
+        let program = parse(&tokens).expect("parsing should pass");
+
+        assert!(matches!(
+            program.statements[0],
+            Statement::If {
+                else_branch: ref first_tail,
+                ..
+            } if matches!(
+                first_tail.as_slice(),
+                [Statement::If {
+                    else_branch,
+                    ..
+                }] if !else_branch.is_empty()
+            )
+        ));
+    }
+
+    #[test]
     fn parses_return_break_and_continue() {
         let tokens = lex(r#"
 fn scan(limit: i64) -> i64:
@@ -973,6 +1034,51 @@ else:
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_if_expression_with_elif() {
+        let tokens = lex(r#"
+let label = if value < 0:
+    "negative"
+elif value == 0:
+    "zero"
+else:
+    "positive"
+"#)
+        .expect("lexing should pass");
+        let program = parse(&tokens).expect("parsing should pass");
+
+        assert!(matches!(
+            program.statements[0],
+            Statement::Let {
+                value: Expr::If {
+                    else_branch: ref first_tail,
+                    ..
+                },
+                ..
+            } if matches!(
+                first_tail.as_slice(),
+                [Statement::If {
+                    else_branch,
+                    ..
+                }] if !else_branch.is_empty()
+            )
+        ));
+    }
+
+    #[test]
+    fn rejects_if_expression_elif_without_final_else() {
+        let tokens = lex(r#"
+let label = if value < 0:
+    "negative"
+elif value == 0:
+    "zero"
+"#)
+        .expect("lexing should pass");
+        let error = parse(&tokens).expect_err("if expression should require final else");
+
+        assert!(error.message.contains("expected 'else' branch"));
     }
 
     #[test]

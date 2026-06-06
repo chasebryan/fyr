@@ -5,8 +5,17 @@ fn sum(values: [i64]) -> i64:
     return total
 
 let values = [3, 5, 8, 13]
-let more_values = values + [21]
+let more_values = append(values, 21)
+let middle_values = slice(more_values, 1, 4)
+let safe_missing = get(more_values, 99, -1)
+let found_index = find(more_values, 13)
+let value_count = count(more_values, 13)
 let empty: [i64] = []
 print(sum(more_values))
 print(more_values[2])
+print(middle_values)
+print(safe_missing)
+print(found_index)
+print(value_count)
 print(len(empty))
+print(is_empty(empty))

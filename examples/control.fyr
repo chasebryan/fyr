@@ -7,4 +7,15 @@ fn first_multiple_of_seven(limit: i64) -> i64:
         i = i + 1
     return -1
 
+fn size_label(value: i64) -> str:
+    if value < 0:
+        return "negative"
+    elif value == 0:
+        return "zero"
+    elif value == 1:
+        return "one"
+    else:
+        return "many"
+
 print(first_multiple_of_seven(20))
+print(size_label(1))

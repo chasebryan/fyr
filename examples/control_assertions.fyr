@@ -6,5 +6,27 @@ fn first_multiple_of_seven(limit: i64) -> i64:
         i = i + 1
     return -1
 
+fn size_label(value: i64) -> str:
+    if value < 0:
+        return "negative"
+    elif value == 0:
+        return "zero"
+    elif value == 1:
+        return "one"
+    else:
+        return "many"
+
+let branch_label = if len([1, 2]) == 0:
+    "empty"
+elif len([1, 2]) == 2:
+    "pair"
+else:
+    "other"
+
 assert(first_multiple_of_seven(20) == 7)
 assert(first_multiple_of_seven(6) == -1)
+assert(size_label(-3) == "negative")
+assert(size_label(0) == "zero")
+assert(size_label(1) == "one")
+assert(size_label(3) == "many")
+assert(branch_label == "pair")

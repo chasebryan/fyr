@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 
 use crate::ast::{BinaryOp, Expr, Param, Program, Statement, TypeName, UnaryOp};
@@ -91,6 +91,7 @@ impl Checker {
                 if self.structs.contains_key(name) || self.current_scope().contains_key(name) {
                     return Err(type_error(format!("struct '{name}' already exists")));
                 }
+                reject_duplicate_members("struct", name, "field", fields)?;
 
                 self.structs.insert(name.clone(), fields.clone());
             }
@@ -115,6 +116,7 @@ impl Checker {
             } = statement
             {
                 reject_inferred_signature(name, params, return_type)?;
+                reject_duplicate_members("function", name, "parameter", params)?;
                 for param in params {
                     self.validate_type_name(&param.ty)?;
                 }
@@ -125,11 +127,7 @@ impl Checker {
                     return_type: Box::new(return_type.as_type()),
                 };
 
-                if self.current_scope().contains_key(name) {
-                    return Err(type_error(format!("binding '{name}' already exists")));
-                }
-
-                self.define(name, signature, false);
+                self.define(name, signature, false)?;
             }
         }
 
@@ -170,6 +168,7 @@ impl Checker {
                 ..
             } => {
                 reject_inferred_signature("<local>", params, return_type)?;
+                reject_duplicate_members("function", "<local>", "parameter", params)?;
                 for param in params {
                     self.validate_type_name(&param.ty)?;
                 }
@@ -179,7 +178,7 @@ impl Checker {
                 self.push_scope();
                 self.return_types.push(expected.clone());
                 for Param { name, ty } in params {
-                    self.define(name, ty.as_type(), false);
+                    self.define(name, ty.as_type(), false)?;
                 }
                 let body_type = self.check_block(body)?;
                 self.return_types.pop();
@@ -253,7 +252,7 @@ impl Checker {
             value_type
         };
 
-        self.define(name, binding_type, mutable);
+        self.define(name, binding_type, mutable)?;
         Ok(Type::Unit)
     }
 
@@ -280,7 +279,7 @@ impl Checker {
                 }
             }
             Expr::Binary { left, op, right } => self.check_binary(left, *op, right),
-            Expr::Call { callee, args } => self.check_call(callee, args),
+            Expr::Call { callee, args } => self.check_call(callee, args, expected),
             Expr::StructInit { name, fields } => self.check_struct_init(name, fields),
             Expr::Field { object, field } => self.check_field(object, field),
             Expr::Array(elements) => self.check_array(elements, expected),
@@ -507,7 +506,12 @@ impl Checker {
         }
     }
 
-    fn check_call(&mut self, callee: &str, args: &[Expr]) -> FyrResult<Type> {
+    fn check_call(
+        &mut self,
+        callee: &str,
+        args: &[Expr],
+        expected: Option<&Type>,
+    ) -> FyrResult<Type> {
         match callee {
             "len" => {
                 if args.len() != 1 {
@@ -599,6 +603,214 @@ impl Checker {
                     ))),
                 }
             }
+            "find" => {
+                if args.len() != 2 {
+                    return Err(type_error("find expects exactly two arguments"));
+                }
+
+                if is_empty_array_literal(&args[0]) {
+                    let found = self.check_expr(&args[1])?;
+                    if !is_equatable_type(&found) {
+                        return Err(type_error(format!("{found} cannot be searched with find")));
+                    }
+                    return Ok(Type::I64);
+                }
+
+                let collection_type = self.check_expr(&args[0])?;
+                match collection_type {
+                    Type::Array(element) => {
+                        if !is_equatable_type(&element) {
+                            return Err(type_error(format!(
+                                "{element} cannot be searched with find"
+                            )));
+                        }
+
+                        let found = self.check_expr_with_hint(&args[1], Some(&element))?;
+                        if found != *element {
+                            return Err(type_error(format!(
+                                "find expected {element}, found {found}"
+                            )));
+                        }
+
+                        Ok(Type::I64)
+                    }
+                    Type::Str => {
+                        let found = self.check_expr(&args[1])?;
+                        if found != Type::Str {
+                            return Err(type_error(format!(
+                                "find(str, value) expected str, found {found}"
+                            )));
+                        }
+
+                        Ok(Type::I64)
+                    }
+                    found => Err(type_error(format!(
+                        "find expects an array or str, found {found}"
+                    ))),
+                }
+            }
+            "count" => {
+                if args.len() != 2 {
+                    return Err(type_error("count expects exactly two arguments"));
+                }
+
+                if is_empty_array_literal(&args[0]) {
+                    let found = self.check_expr(&args[1])?;
+                    if !is_equatable_type(&found) {
+                        return Err(type_error(format!("{found} cannot be counted with count")));
+                    }
+                    return Ok(Type::I64);
+                }
+
+                let collection_type = self.check_expr(&args[0])?;
+                match collection_type {
+                    Type::Array(element) => {
+                        if !is_equatable_type(&element) {
+                            return Err(type_error(format!(
+                                "{element} cannot be counted with count"
+                            )));
+                        }
+
+                        let found = self.check_expr_with_hint(&args[1], Some(&element))?;
+                        if found != *element {
+                            return Err(type_error(format!(
+                                "count expected {element}, found {found}"
+                            )));
+                        }
+
+                        Ok(Type::I64)
+                    }
+                    Type::Str => {
+                        let found = self.check_expr(&args[1])?;
+                        if found != Type::Str {
+                            return Err(type_error(format!(
+                                "count(str, value) expected str, found {found}"
+                            )));
+                        }
+
+                        Ok(Type::I64)
+                    }
+                    found => Err(type_error(format!(
+                        "count expects an array or str, found {found}"
+                    ))),
+                }
+            }
+            "is_empty" => {
+                if args.len() != 1 {
+                    return Err(type_error("is_empty expects exactly one argument"));
+                }
+
+                if is_empty_array_literal(&args[0]) {
+                    return Ok(Type::Bool);
+                }
+
+                match self.check_expr(&args[0])? {
+                    Type::Array(_) | Type::Str => Ok(Type::Bool),
+                    found => Err(type_error(format!(
+                        "is_empty expects an array or str, found {found}"
+                    ))),
+                }
+            }
+            "get" => {
+                if args.len() != 3 {
+                    return Err(type_error("get expects exactly three arguments"));
+                }
+
+                let index_type = self.check_expr(&args[1])?;
+                if index_type != Type::I64 {
+                    return Err(type_error(format!(
+                        "get index expected i64, found {index_type}"
+                    )));
+                }
+
+                if is_empty_array_literal(&args[0]) {
+                    return self.check_expr_with_hint(&args[2], expected);
+                }
+
+                match self.check_expr(&args[0])? {
+                    Type::Array(element) => {
+                        let found = self.check_expr_with_hint(&args[2], Some(&element))?;
+                        if found != *element {
+                            return Err(type_error(format!(
+                                "get default expected {element}, found {found}"
+                            )));
+                        }
+                        Ok(*element)
+                    }
+                    Type::Str => {
+                        let found = self.check_expr(&args[2])?;
+                        if found != Type::Str {
+                            return Err(type_error(format!(
+                                "get default expected str, found {found}"
+                            )));
+                        }
+                        Ok(Type::Str)
+                    }
+                    found => Err(type_error(format!(
+                        "get expects an array or str, found {found}"
+                    ))),
+                }
+            }
+            "append" => {
+                if args.len() != 2 {
+                    return Err(type_error("append expects exactly two arguments"));
+                }
+
+                if is_empty_array_literal(&args[0]) {
+                    let expected_element = match expected {
+                        Some(Type::Array(element)) => Some(element.as_ref()),
+                        _ => None,
+                    };
+                    let found = self.check_expr_with_hint(&args[1], expected_element)?;
+                    if let Some(expected_element) = expected_element {
+                        if found != *expected_element {
+                            return Err(type_error(format!(
+                                "append expected {expected_element}, found {found}"
+                            )));
+                        }
+                    }
+                    return Ok(Type::Array(Box::new(found)));
+                }
+
+                let collection_type = self.check_expr(&args[0])?;
+                let Type::Array(element) = collection_type else {
+                    return Err(type_error(format!(
+                        "append expects an array, found {collection_type}"
+                    )));
+                };
+
+                let found = self.check_expr_with_hint(&args[1], Some(&element))?;
+                if found != *element {
+                    return Err(type_error(format!(
+                        "append expected {element}, found {found}"
+                    )));
+                }
+
+                Ok(Type::Array(element))
+            }
+            "slice" => {
+                if args.len() != 3 {
+                    return Err(type_error("slice expects exactly three arguments"));
+                }
+
+                let collection_type = self.check_expr(&args[0])?;
+                for (label, arg) in [("start", &args[1]), ("end", &args[2])] {
+                    let found = self.check_expr(arg)?;
+                    if found != Type::I64 {
+                        return Err(type_error(format!(
+                            "slice {label} expected i64, found {found}"
+                        )));
+                    }
+                }
+
+                match collection_type {
+                    Type::Array(element) => Ok(Type::Array(element)),
+                    Type::Str => Ok(Type::Str),
+                    found => Err(type_error(format!(
+                        "slice expects an array or str, found {found}"
+                    ))),
+                }
+            }
             "print" => {
                 if args.len() != 1 {
                     return Err(type_error("print expects exactly one argument"));
@@ -676,12 +888,13 @@ impl Checker {
         then_branch: &[Statement],
         else_branch: &[Statement],
     ) -> FyrResult<Type> {
-        if else_branch.is_empty() {
+        if !if_chain_has_final_else(else_branch) {
             let condition_type = self.check_expr(condition)?;
             if condition_type != Type::Bool {
                 return Err(expected_type("bool", &condition_type));
             }
             self.check_block_scoped(then_branch)?;
+            self.check_block_scoped(else_branch)?;
             return Ok(Type::Unit);
         }
 
@@ -730,7 +943,7 @@ impl Checker {
 
         self.loop_depth += 1;
         self.push_scope();
-        self.define(name, *element_type, false);
+        self.define(name, *element_type, false)?;
         let result = self.check_block(body);
         self.pop_scope();
         self.loop_depth -= 1;
@@ -758,9 +971,14 @@ impl Checker {
         Ok(last_type)
     }
 
-    fn define(&mut self, name: &str, ty: Type, mutable: bool) {
+    fn define(&mut self, name: &str, ty: Type, mutable: bool) -> FyrResult<()> {
+        if self.structs.contains_key(name) || self.current_scope().contains_key(name) {
+            return Err(type_error(format!("binding '{name}' already exists")));
+        }
+
         self.current_scope()
             .insert(name.to_owned(), Binding { ty, mutable });
+        Ok(())
     }
 
     fn lookup(&self, name: &str) -> Option<&Binding> {
@@ -831,12 +1049,40 @@ fn reject_inferred_signature(
     Ok(())
 }
 
+fn reject_duplicate_members(
+    owner_kind: &str,
+    owner_name: &str,
+    member_kind: &str,
+    members: &[Param],
+) -> FyrResult<()> {
+    let mut seen = HashSet::new();
+
+    for member in members {
+        if !seen.insert(member.name.as_str()) {
+            return Err(type_error(format!(
+                "{owner_kind} '{owner_name}' has duplicate {member_kind} '{}'",
+                member.name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn merge_branch_types(left: Type, right: Type) -> Option<Type> {
     match (left, right) {
         (Type::Never, Type::Never) => Some(Type::Never),
         (Type::Never, ty) | (ty, Type::Never) => Some(ty),
         (left, right) if left == right => Some(left),
         _ => None,
+    }
+}
+
+fn if_chain_has_final_else(else_branch: &[Statement]) -> bool {
+    match else_branch {
+        [] => false,
+        [Statement::If { else_branch, .. }] => if_chain_has_final_else(else_branch),
+        _ => true,
     }
 }
 
@@ -914,6 +1160,96 @@ fn add(a, b):
         .expect_err("missing annotations should fail");
 
         assert!(error.message.contains("explicit type"));
+    }
+
+    #[test]
+    fn rejects_duplicate_function_parameters() {
+        let error = typecheck(
+            r#"
+fn choose(value: i64, value: i64) -> i64:
+    return value
+"#,
+        )
+        .expect_err("duplicate parameter should fail");
+
+        assert!(
+            error
+                .message
+                .contains("function 'choose' has duplicate parameter 'value'")
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_bindings_in_same_scope() {
+        let error = typecheck(
+            r#"
+let answer = 41
+let answer = 42
+"#,
+        )
+        .expect_err("duplicate let binding should fail");
+
+        assert!(error.message.contains("binding 'answer' already exists"));
+    }
+
+    #[test]
+    fn rejects_binding_that_redeclares_parameter() {
+        let error = typecheck(
+            r#"
+fn echo(value: i64) -> i64:
+    let value = 42
+    return value
+"#,
+        )
+        .expect_err("parameter redeclaration should fail");
+
+        assert!(error.message.contains("binding 'value' already exists"));
+    }
+
+    #[test]
+    fn rejects_binding_that_redeclares_for_variable() {
+        let error = typecheck(
+            r#"
+for value in [1]:
+    let value = 2
+"#,
+        )
+        .expect_err("for variable redeclaration should fail");
+
+        assert!(error.message.contains("binding 'value' already exists"));
+    }
+
+    #[test]
+    fn rejects_binding_name_colliding_with_function_name() {
+        let error = typecheck(
+            r#"
+fn answer() -> i64:
+    return 42
+
+let answer = 42
+"#,
+        )
+        .expect_err("function and binding name collision should fail");
+
+        assert!(error.message.contains("binding 'answer' already exists"));
+    }
+
+    #[test]
+    fn accepts_shadowing_in_inner_block() {
+        typecheck(
+            r#"
+let value = 1
+
+if true:
+    let value = 2
+    assert(value == 2)
+else:
+    assert(value == 1)
+
+assert(value == 1)
+"#,
+        )
+        .expect("inner block shadowing should typecheck");
     }
 
     #[test]
@@ -1045,6 +1381,55 @@ let p = Point { x: 3, y: "four" }
         .expect_err("wrong field type should fail");
 
         assert!(error.message.contains("field 'y' expected i64"));
+    }
+
+    #[test]
+    fn rejects_duplicate_struct_fields() {
+        let error = typecheck(
+            r#"
+struct Point:
+    x: i64
+    x: bool
+"#,
+        )
+        .expect_err("duplicate struct field should fail");
+
+        assert!(
+            error
+                .message
+                .contains("struct 'Point' has duplicate field 'x'")
+        );
+    }
+
+    #[test]
+    fn rejects_function_name_colliding_with_struct_name() {
+        let error = typecheck(
+            r#"
+struct Point:
+    x: i64
+
+fn Point() -> i64:
+    return 1
+"#,
+        )
+        .expect_err("function and struct name collision should fail");
+
+        assert!(error.message.contains("binding 'Point' already exists"));
+    }
+
+    #[test]
+    fn rejects_binding_name_colliding_with_struct_name() {
+        let error = typecheck(
+            r#"
+struct Point:
+    x: i64
+
+let Point = 42
+"#,
+        )
+        .expect_err("struct and binding name collision should fail");
+
+        assert!(error.message.contains("binding 'Point' already exists"));
     }
 
     #[test]
@@ -1205,8 +1590,64 @@ total
 
     #[test]
     fn accepts_assertions() {
-        typecheck("assert(true)\nassert(1 < 2, \"ordered\")\n")
+        typecheck("assert(true)\nassert(not false and 1 < 2 or false, \"ordered\")\n")
             .expect("assertions should typecheck");
+    }
+
+    #[test]
+    fn accepts_elif_chains() {
+        typecheck(
+            r#"
+fn label(value: i64) -> str:
+    if value < 0:
+        return "negative"
+    elif value == 0:
+        return "zero"
+    elif value == 1:
+        return "one"
+    else:
+        return "many"
+
+assert(label(0) == "zero")
+"#,
+        )
+        .expect("elif branches should typecheck");
+    }
+
+    #[test]
+    fn accepts_elif_if_expressions() {
+        typecheck(
+            r#"
+let value = 0
+let label = if value < 0:
+    "negative"
+elif value == 0:
+    "zero"
+else:
+    "positive"
+
+assert(label == "zero")
+"#,
+        )
+        .expect("elif expression should typecheck");
+    }
+
+    #[test]
+    fn rejects_mismatched_elif_expression_branches() {
+        let error = typecheck(
+            r#"
+let value = 0
+let label = if value < 0:
+    "negative"
+elif value == 0:
+    0
+else:
+    "positive"
+"#,
+        )
+        .expect_err("mismatched elif expression should fail");
+
+        assert!(error.message.contains("branches"));
     }
 
     #[test]
@@ -1239,6 +1680,250 @@ assert(contains(points, Point { x: 3, y: 4 }))
 "#,
         )
         .expect("contains should typecheck");
+    }
+
+    #[test]
+    fn accepts_slice_for_arrays_and_strings() {
+        typecheck(
+            r#"
+let values = [3, 5, 8, 13, 21]
+let middle: [i64] = slice(values, 1, 4)
+let prefix: str = slice("secure Fyr", 0, 6)
+assert(middle == [5, 8, 13])
+assert(prefix == "secure")
+"#,
+        )
+        .expect("slice should typecheck");
+    }
+
+    #[test]
+    fn accepts_is_empty_for_arrays_and_strings() {
+        typecheck(
+            r#"
+let values = [3, 5, 8]
+assert(is_empty([]))
+assert(not is_empty(values))
+assert(is_empty(""))
+assert(not is_empty("Fyr"))
+"#,
+        )
+        .expect("is_empty should typecheck");
+    }
+
+    #[test]
+    fn accepts_get_with_fallbacks() {
+        typecheck(
+            r#"
+let values = [3, 5, 8]
+let found: i64 = get(values, 1, -1)
+let fallback = get(values, 99, -1)
+let inferred = get([], 0, 42)
+let letter: str = get("Fyr", 1, "?")
+assert(found == 5)
+assert(fallback == -1)
+assert(inferred == 42)
+assert(letter == "y")
+"#,
+        )
+        .expect("get should typecheck");
+    }
+
+    #[test]
+    fn accepts_find_for_arrays_and_strings() {
+        typecheck(
+            r#"
+struct Point:
+    x: i64
+    y: i64
+
+let values = [3, 5, 8]
+let points = [Point { x: 3, y: 4 }]
+let empty_index = find([], 21)
+let value_index = find(values, 5)
+let point_index = find(points, Point { x: 3, y: 4 })
+let text_index = find("secure Fyr", "Fyr")
+assert(empty_index == -1)
+assert(value_index == 1)
+assert(point_index == 0)
+assert(text_index == 7)
+"#,
+        )
+        .expect("find should typecheck");
+    }
+
+    #[test]
+    fn rejects_find_collection_type_mismatch() {
+        let error = typecheck("find(42, 1)\n").expect_err("find collection should fail");
+
+        assert!(error.message.contains("find expects an array or str"));
+    }
+
+    #[test]
+    fn rejects_find_value_type_mismatch() {
+        let array_error =
+            typecheck("find([1, 2, 3], true)\n").expect_err("array needle should fail");
+        assert!(array_error.message.contains("find expected i64"));
+
+        let string_error = typecheck("find(\"Fyr\", 1)\n").expect_err("str needle should fail");
+        assert!(
+            string_error
+                .message
+                .contains("find(str, value) expected str")
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_find_arity() {
+        let error = typecheck("find([1, 2, 3])\n").expect_err("find arity should fail");
+
+        assert!(error.message.contains("find expects exactly two arguments"));
+    }
+
+    #[test]
+    fn accepts_count_for_arrays_and_strings() {
+        typecheck(
+            r#"
+struct Point:
+    x: i64
+    y: i64
+
+let values = [3, 5, 3, 8, 3]
+let points = [Point { x: 3, y: 4 }]
+let empty_count = count([], 21)
+let value_count = count(values, 3)
+let point_count = count(points, Point { x: 3, y: 4 })
+let text_count = count("secure Fyr secure", "secure")
+assert(empty_count == 0)
+assert(value_count == 3)
+assert(point_count == 1)
+assert(text_count == 2)
+"#,
+        )
+        .expect("count should typecheck");
+    }
+
+    #[test]
+    fn rejects_count_collection_type_mismatch() {
+        let error = typecheck("count(42, 1)\n").expect_err("count collection should fail");
+
+        assert!(error.message.contains("count expects an array or str"));
+    }
+
+    #[test]
+    fn rejects_count_value_type_mismatch() {
+        let array_error =
+            typecheck("count([1, 2, 3], true)\n").expect_err("array needle should fail");
+        assert!(array_error.message.contains("count expected i64"));
+
+        let string_error = typecheck("count(\"Fyr\", 1)\n").expect_err("str needle should fail");
+        assert!(
+            string_error
+                .message
+                .contains("count(str, value) expected str")
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_count_arity() {
+        let error = typecheck("count([1, 2, 3])\n").expect_err("count arity should fail");
+
+        assert!(
+            error
+                .message
+                .contains("count expects exactly two arguments")
+        );
+    }
+
+    #[test]
+    fn accepts_get_with_empty_array_default_hint() {
+        typecheck(
+            r#"
+let rows = [[1, 2]]
+let first_row = get(rows, 0, [])
+let fallback: [i64] = get([], 0, [])
+assert(first_row == [1, 2])
+assert(len(fallback) == 0)
+"#,
+        )
+        .expect("get should hint empty array defaults");
+    }
+
+    #[test]
+    fn rejects_get_collection_type_mismatch() {
+        let error = typecheck("get(42, 0, 1)\n").expect_err("get collection should fail");
+
+        assert!(error.message.contains("get expects an array or str"));
+    }
+
+    #[test]
+    fn rejects_get_index_type_mismatch() {
+        let error = typecheck("get([1, 2, 3], true, 0)\n").expect_err("get index should fail");
+
+        assert!(error.message.contains("get index expected i64"));
+    }
+
+    #[test]
+    fn rejects_get_default_type_mismatch() {
+        let array_error =
+            typecheck("get([1, 2, 3], 0, true)\n").expect_err("array default should fail");
+        assert!(array_error.message.contains("get default expected i64"));
+
+        let string_error = typecheck("get(\"Fyr\", 0, 0)\n").expect_err("str default should fail");
+        assert!(string_error.message.contains("get default expected str"));
+    }
+
+    #[test]
+    fn rejects_wrong_get_arity() {
+        let error = typecheck("get([1, 2, 3], 0)\n").expect_err("get arity should fail");
+
+        assert!(
+            error
+                .message
+                .contains("get expects exactly three arguments")
+        );
+    }
+
+    #[test]
+    fn rejects_is_empty_type_mismatch() {
+        let error = typecheck("is_empty(42)\n").expect_err("is_empty type should fail");
+
+        assert!(error.message.contains("is_empty expects an array or str"));
+    }
+
+    #[test]
+    fn rejects_wrong_is_empty_arity() {
+        let error = typecheck("is_empty([], [])\n").expect_err("is_empty arity should fail");
+
+        assert!(
+            error
+                .message
+                .contains("is_empty expects exactly one argument")
+        );
+    }
+
+    #[test]
+    fn rejects_slice_collection_type_mismatch() {
+        let error = typecheck("slice(42, 0, 1)\n").expect_err("slice collection should fail");
+
+        assert!(error.message.contains("slice expects an array or str"));
+    }
+
+    #[test]
+    fn rejects_slice_index_type_mismatch() {
+        let error = typecheck("slice([1, 2, 3], true, 2)\n").expect_err("slice index should fail");
+
+        assert!(error.message.contains("slice start expected i64"));
+    }
+
+    #[test]
+    fn rejects_wrong_slice_arity() {
+        let error = typecheck("slice([1, 2, 3], 1)\n").expect_err("slice arity should fail");
+
+        assert!(
+            error
+                .message
+                .contains("slice expects exactly three arguments")
+        );
     }
 
     #[test]
@@ -1322,6 +2007,57 @@ assert(right == [3, 4])
             .expect_err("mixed array concatenation should fail");
 
         assert!(error.message.contains("array element expected i64"));
+    }
+
+    #[test]
+    fn accepts_array_append() {
+        typecheck(
+            r#"
+let values = append([3, 5, 8], 13)
+let more_values = append(values, 21)
+assert(more_values == [3, 5, 8, 13, 21])
+"#,
+        )
+        .expect("append should typecheck");
+    }
+
+    #[test]
+    fn infers_append_from_empty_array_literal() {
+        typecheck(
+            r#"
+let values = append([], 1)
+let nested: [[i64]] = append([], [])
+assert(values == [1])
+assert(len(nested) == 1)
+assert(len(nested[0]) == 0)
+"#,
+        )
+        .expect("append should infer empty array element type");
+    }
+
+    #[test]
+    fn rejects_append_collection_type_mismatch() {
+        let error = typecheck("append(42, 1)\n").expect_err("append collection should fail");
+
+        assert!(error.message.contains("append expects an array"));
+    }
+
+    #[test]
+    fn rejects_append_value_type_mismatch() {
+        let error = typecheck("append([1, 2, 3], true)\n").expect_err("append value should fail");
+
+        assert!(error.message.contains("append expected i64"));
+    }
+
+    #[test]
+    fn rejects_wrong_append_arity() {
+        let error = typecheck("append([1, 2, 3])\n").expect_err("append arity should fail");
+
+        assert!(
+            error
+                .message
+                .contains("append expects exactly two arguments")
+        );
     }
 
     #[test]

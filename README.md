@@ -90,6 +90,20 @@ fn first_multiple_of_seven(limit: i64) -> i64:
     return -1
 ```
 
+Use `elif` for readable multi-way branching:
+
+```fyr
+fn size_label(value: i64) -> str:
+    if value < 0:
+        return "negative"
+    elif value == 0:
+        return "zero"
+    elif value == 1:
+        return "one"
+    else:
+        return "many"
+```
+
 Structs define nominal data:
 
 ```fyr
@@ -111,10 +125,19 @@ fn sum(values: [i64]) -> i64:
     return total
 
 let values = [3, 5, 8, 13]
-let more_values = values + [21]
+let more_values = append(values, 21)
+let middle_values = slice(more_values, 1, 4)
+let safe_missing = get(more_values, 99, -1)
+let found_index = find(more_values, 13)
+let value_count = count(more_values, 13)
 let empty: [i64] = []
 print(sum(more_values))
+print(middle_values)
+print(safe_missing)
+print(found_index)
+print(value_count)
 print(len(empty))
+print(is_empty(empty))
 ```
 
 Use `range` for counted loops:
@@ -138,8 +161,20 @@ Assertions make Fyr files testable:
 
 ```fyr
 assert(sum([3, 5, 8, 13]) == 29, "sum should add every element")
+assert(is_empty([]))
+assert(append([3, 5, 8], 13) == [3, 5, 8, 13])
+assert(slice([3, 5, 8, 13], 1, 3) == [5, 8])
+assert(get([3, 5, 8], 99, -1) == -1)
+assert(find([3, 5, 8], 8) == 2)
+assert(count([3, 5, 3, 8, 3], 3) == 3)
 assert(contains([3, 5, 8, 13], 8))
+assert(not contains([3, 5, 8, 13], 21) and contains([3, 5, 8, 13], 8))
 assert(contains("secure Fyr", "Fyr"))
+assert(slice("secure Fyr", 0, 6) == "secure")
+assert(get("Fyr", 1, "?") == "y")
+assert(find("secure Fyr", "Fyr") == 7)
+assert(count("secure Fyr secure", "secure") == 2)
+assert(is_empty(""))
 assert([1, 2, 3] == [1, 2, 3])
 assert(range(5)[4] == 4)
 ```
@@ -157,23 +192,25 @@ The bootstrap supports:
 - integer, boolean, and string literals
 - inferred and explicitly annotated `let` bindings
 - inferred and explicitly annotated mutable `var` bindings and assignment
-- arithmetic and comparison operators
+- checked integer arithmetic and comparison operators
 - value equality for primitives, arrays, structs, and `unit`
-- boolean `&&`, `||`, and `!`
+- boolean `and`, `or`, and `not`, with `&&`, `||`, and `!` aliases
 - string concatenation with `+`
 - typed function signatures with Python-style indented bodies
 - recursive function calls
 - checked function calls and return types
-- statement-style `if` blocks and value-producing `if` / `else` branches
+- statement-style `if` / `elif` / `else` blocks and value-producing `if` / `elif` / `else` branches
 - `while` loops and array `for value in values` loops
 - `return`, `break`, and `continue`
 - `struct` declarations, struct literals, and field access
-- homogeneous array literals, `[T]` annotations, typed empty arrays, concatenation with `+`, checked indexing, and `len(array)`
-- built-in `print(value)`, `type(value)`, `len(value)`, `contains(value, item)`, end-exclusive `range(...)`, and `assert(...)`
+- homogeneous array literals, `[T]` annotations, typed empty arrays, append, concatenation with `+`, checked indexing, fallback reads, checked slicing, search/count helpers, emptiness checks, and `len(array)`
+- built-in `print(value)`, `type(value)`, `len(value)`, `is_empty(value)`, `get(value, index, default)`, `find(value, item)`, `count(value, item)`, `append(array, value)`, `contains(value, item)`, `slice(value, start, end)`, end-exclusive `range(...)`, and `assert(...)`
 - `fyr test <file>` assertion-file execution
 - one-statement-per-line scripts
 
-The bootstrap typechecker enforces `i64`, `bool`, `str`, `unit`, struct, and array types across function calls, return values, branch expressions, assignments, equality, indexing, and supported operators.
+The bootstrap typechecker enforces `i64`, `bool`, `str`, `unit`, struct, and array types across function calls, return values, branch expressions, assignments, equality, indexing, and supported operators. Runtime integer arithmetic fails on overflow, division by zero, and remainder by zero instead of wrapping.
+
+The checker also rejects ambiguous declaration shapes such as duplicate bindings in the same scope, duplicate function parameters, duplicate struct fields, and value/function names that reuse a struct name.
 
 Bootstrap `range` materializes an array and currently caps each range at 1,000,000 elements. Later iterator work should make counted loops lazy.
 

@@ -24,6 +24,7 @@ pub enum TokenKind {
     For,
     In,
     If,
+    Elif,
     Else,
     While,
     Return,
@@ -365,6 +366,8 @@ impl Lexer {
         }
 
         let kind = match raw.as_str() {
+            "and" => TokenKind::AndAnd,
+            "elif" => TokenKind::Elif,
             "else" => TokenKind::Else,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
@@ -374,6 +377,8 @@ impl Lexer {
             "if" => TokenKind::If,
             "in" => TokenKind::In,
             "let" => TokenKind::Let,
+            "not" => TokenKind::Bang,
+            "or" => TokenKind::OrOr,
             "return" => TokenKind::Return,
             "struct" => TokenKind::Struct,
             "true" => TokenKind::True,
@@ -439,6 +444,37 @@ mod tests {
 
         assert!(matches!(kinds[0], TokenKind::For));
         assert!(matches!(kinds[2], TokenKind::In));
+    }
+
+    #[test]
+    fn lexes_elif_keyword() {
+        let tokens = lex("elif ready:\n    print(\"yes\")\n").expect("lexing should pass");
+        let kinds: Vec<TokenKind> = tokens.into_iter().map(|token| token.kind).collect();
+
+        assert!(matches!(kinds[0], TokenKind::Elif));
+    }
+
+    #[test]
+    fn lexes_word_boolean_operators() {
+        let tokens = lex("let ready = not false and true or false\n").expect("lexing should pass");
+        let kinds: Vec<TokenKind> = tokens.into_iter().map(|token| token.kind).collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Let,
+                TokenKind::Identifier("ready".to_owned()),
+                TokenKind::Equal,
+                TokenKind::Bang,
+                TokenKind::False,
+                TokenKind::AndAnd,
+                TokenKind::True,
+                TokenKind::OrOr,
+                TokenKind::False,
+                TokenKind::Newline,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]

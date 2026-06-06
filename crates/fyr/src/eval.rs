@@ -313,7 +313,7 @@ impl Evaluator {
 
     fn eval_unary(&self, op: UnaryOp, value: Value) -> FyrResult<Value> {
         match (op, value) {
-            (UnaryOp::Negate, Value::Int(value)) => Ok(Value::Int(-value)),
+            (UnaryOp::Negate, Value::Int(value)) => checked_int("negation", value.checked_neg()),
             (UnaryOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
             (UnaryOp::Negate, other) => type_error("integer", &other),
             (UnaryOp::Not, other) => type_error("bool", &other),
@@ -355,17 +355,27 @@ impl Evaluator {
         };
 
         let value = match (left, op, right) {
-            (Value::Int(left), BinaryOp::Add, Value::Int(right)) => Value::Int(left + right),
-            (Value::Int(left), BinaryOp::Subtract, Value::Int(right)) => Value::Int(left - right),
-            (Value::Int(left), BinaryOp::Multiply, Value::Int(right)) => Value::Int(left * right),
+            (Value::Int(left), BinaryOp::Add, Value::Int(right)) => {
+                checked_int("addition", left.checked_add(right))?
+            }
+            (Value::Int(left), BinaryOp::Subtract, Value::Int(right)) => {
+                checked_int("subtraction", left.checked_sub(right))?
+            }
+            (Value::Int(left), BinaryOp::Multiply, Value::Int(right)) => {
+                checked_int("multiplication", left.checked_mul(right))?
+            }
             (Value::Int(_), BinaryOp::Divide, Value::Int(0)) => {
                 return Err(runtime_error("division by zero"));
             }
-            (Value::Int(left), BinaryOp::Divide, Value::Int(right)) => Value::Int(left / right),
+            (Value::Int(left), BinaryOp::Divide, Value::Int(right)) => {
+                checked_int("division", left.checked_div(right))?
+            }
             (Value::Int(_), BinaryOp::Remainder, Value::Int(0)) => {
                 return Err(runtime_error("remainder by zero"));
             }
-            (Value::Int(left), BinaryOp::Remainder, Value::Int(right)) => Value::Int(left % right),
+            (Value::Int(left), BinaryOp::Remainder, Value::Int(right)) => {
+                checked_int("remainder", left.checked_rem(right))?
+            }
             (Value::Str(left), BinaryOp::Add, Value::Str(right)) => {
                 Value::Str(format!("{left}{right}"))
             }
@@ -421,6 +431,12 @@ impl Evaluator {
             "range" => self.eval_range(args),
             "assert" => self.eval_assert(args),
             "contains" => self.eval_contains(args),
+            "slice" => self.eval_slice(args),
+            "append" => self.eval_append(args),
+            "is_empty" => self.eval_is_empty(args),
+            "get" => self.eval_get(args),
+            "find" => self.eval_find(args),
+            "count" => self.eval_count(args),
             "print" => {
                 if args.len() != 1 {
                     return Err(runtime_error("print expects exactly one argument"));
@@ -443,6 +459,225 @@ impl Evaluator {
                 Ok(Flow::Value(Value::Str(value.type_name().to_owned())))
             }
             other => self.eval_user_call(other, args),
+        }
+    }
+
+    fn eval_count(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 2 {
+            return Err(runtime_error("count expects exactly two arguments"));
+        }
+
+        let collection = match self.eval_expr_flow(&args[0])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        let needle = match self.eval_expr_flow(&args[1])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+
+        match (collection, needle) {
+            (Value::Array(values), needle) => {
+                let mut count = 0;
+                for value in &values {
+                    if values_equal(value, &needle)? {
+                        count += 1;
+                    }
+                }
+                Ok(Flow::Value(Value::Int(count)))
+            }
+            (Value::Str(value), Value::Str(needle)) => {
+                let count = if needle.is_empty() {
+                    0
+                } else {
+                    value.matches(&needle).count() as i64
+                };
+                Ok(Flow::Value(Value::Int(count)))
+            }
+            (Value::Str(_), other) => Err(runtime_error(format!(
+                "count(str, value) expected str, found {}",
+                other.type_name()
+            ))),
+            (other, _) => Err(runtime_error(format!(
+                "count expects an array or str, found {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn eval_find(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 2 {
+            return Err(runtime_error("find expects exactly two arguments"));
+        }
+
+        let collection = match self.eval_expr_flow(&args[0])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        let needle = match self.eval_expr_flow(&args[1])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+
+        match (collection, needle) {
+            (Value::Array(values), needle) => {
+                for (index, value) in values.iter().enumerate() {
+                    if values_equal(value, &needle)? {
+                        return Ok(Flow::Value(Value::Int(index as i64)));
+                    }
+                }
+                Ok(Flow::Value(Value::Int(-1)))
+            }
+            (Value::Str(value), Value::Str(needle)) => {
+                let index = value
+                    .find(&needle)
+                    .map(|byte_index| value[..byte_index].chars().count() as i64)
+                    .unwrap_or(-1);
+                Ok(Flow::Value(Value::Int(index)))
+            }
+            (Value::Str(_), other) => Err(runtime_error(format!(
+                "find(str, value) expected str, found {}",
+                other.type_name()
+            ))),
+            (other, _) => Err(runtime_error(format!(
+                "find expects an array or str, found {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn eval_get(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 3 {
+            return Err(runtime_error("get expects exactly three arguments"));
+        }
+
+        let collection = match self.eval_expr_flow(&args[0])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        let index = match self.eval_expr_flow(&args[1])? {
+            Flow::Value(Value::Int(value)) => value,
+            Flow::Value(other) => {
+                return Err(runtime_error(format!(
+                    "get index expected i64, found {}",
+                    other.type_name()
+                )));
+            }
+            flow => return Ok(flow),
+        };
+
+        match collection {
+            Value::Array(values) => match usize::try_from(index)
+                .ok()
+                .and_then(|index| values.get(index).cloned())
+            {
+                Some(value) => Ok(Flow::Value(value)),
+                None => self.eval_expr_flow(&args[2]),
+            },
+            Value::Str(value) => match usize::try_from(index)
+                .ok()
+                .and_then(|index| value.chars().nth(index))
+            {
+                Some(ch) => Ok(Flow::Value(Value::Str(ch.to_string()))),
+                None => self.eval_expr_flow(&args[2]),
+            },
+            other => Err(runtime_error(format!(
+                "get expects an array or str, found {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn eval_is_empty(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 1 {
+            return Err(runtime_error("is_empty expects exactly one argument"));
+        }
+
+        let value = match self.eval_expr_flow(&args[0])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+
+        match value {
+            Value::Array(values) => Ok(Flow::Value(Value::Bool(values.is_empty()))),
+            Value::Str(value) => Ok(Flow::Value(Value::Bool(value.is_empty()))),
+            other => Err(runtime_error(format!(
+                "is_empty expects an array or str, found {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn eval_append(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 2 {
+            return Err(runtime_error("append expects exactly two arguments"));
+        }
+
+        let collection = match self.eval_expr_flow(&args[0])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        let value = match self.eval_expr_flow(&args[1])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+
+        match collection {
+            Value::Array(mut values) => {
+                values.push(value);
+                Ok(Flow::Value(Value::Array(values)))
+            }
+            other => Err(runtime_error(format!(
+                "append expects an array, found {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn eval_slice(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 3 {
+            return Err(runtime_error("slice expects exactly three arguments"));
+        }
+
+        let collection = match self.eval_expr_flow(&args[0])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        let start = match self.eval_expr_flow(&args[1])? {
+            Flow::Value(Value::Int(value)) => value,
+            Flow::Value(other) => {
+                return Err(runtime_error(format!(
+                    "slice start expected i64, found {}",
+                    other.type_name()
+                )));
+            }
+            flow => return Ok(flow),
+        };
+        let end = match self.eval_expr_flow(&args[2])? {
+            Flow::Value(Value::Int(value)) => value,
+            Flow::Value(other) => {
+                return Err(runtime_error(format!(
+                    "slice end expected i64, found {}",
+                    other.type_name()
+                )));
+            }
+            flow => return Ok(flow),
+        };
+
+        match collection {
+            Value::Array(values) => {
+                let (start, end) = checked_slice_bounds(start, end, values.len())?;
+                Ok(Flow::Value(Value::Array(values[start..end].to_vec())))
+            }
+            Value::Str(value) => {
+                let chars = value.chars().collect::<Vec<_>>();
+                let (start, end) = checked_slice_bounds(start, end, chars.len())?;
+                Ok(Flow::Value(Value::Str(chars[start..end].iter().collect())))
+            }
+            other => Err(runtime_error(format!(
+                "slice expects an array or str, found {}",
+                other.type_name()
+            ))),
         }
     }
 
@@ -753,6 +988,51 @@ fn type_error<T>(expected: &str, actual: &Value) -> FyrResult<T> {
     )))
 }
 
+fn checked_int(operation: &str, value: Option<i64>) -> FyrResult<Value> {
+    value
+        .map(Value::Int)
+        .ok_or_else(|| runtime_error(format!("integer overflow in {operation}")))
+}
+
+fn checked_slice_bounds(start: i64, end: i64, len: usize) -> FyrResult<(usize, usize)> {
+    if start < 0 {
+        return Err(runtime_error(format!(
+            "slice start must be >= 0, found {start}"
+        )));
+    }
+    if end < 0 {
+        return Err(runtime_error(format!(
+            "slice end must be >= 0, found {end}"
+        )));
+    }
+    if start > end {
+        return Err(runtime_error(format!(
+            "slice start {start} must be <= end {end}"
+        )));
+    }
+
+    let start = usize::try_from(start).map_err(|_| {
+        runtime_error(format!(
+            "slice start {start} out of bounds for length {len}"
+        ))
+    })?;
+    let end = usize::try_from(end)
+        .map_err(|_| runtime_error(format!("slice end {end} out of bounds for length {len}")))?;
+
+    if start > len {
+        return Err(runtime_error(format!(
+            "slice start {start} out of bounds for length {len}"
+        )));
+    }
+    if end > len {
+        return Err(runtime_error(format!(
+            "slice end {end} out of bounds for length {len}"
+        )));
+    }
+
+    Ok((start, end))
+}
+
 fn values_equal(left: &Value, right: &Value) -> FyrResult<bool> {
     match (left, right) {
         (Value::Function(_), _) | (_, Value::Function(_)) => {
@@ -835,6 +1115,53 @@ mod tests {
         let error = run("1 / 0\n").expect_err("division by zero should fail");
 
         assert!(error.message.contains("division by zero"));
+    }
+
+    #[test]
+    fn rejects_integer_addition_overflow() {
+        let error = run("9223372036854775807 + 1\n").expect_err("addition overflow should fail");
+
+        assert!(error.message.contains("integer overflow in addition"));
+    }
+
+    #[test]
+    fn rejects_integer_subtraction_overflow() {
+        let error = run("let min = 0 - 9223372036854775807 - 1\nmin - 1\n")
+            .expect_err("subtraction overflow should fail");
+
+        assert!(error.message.contains("integer overflow in subtraction"));
+    }
+
+    #[test]
+    fn rejects_integer_multiplication_overflow() {
+        let error =
+            run("9223372036854775807 * 2\n").expect_err("multiplication overflow should fail");
+
+        assert!(error.message.contains("integer overflow in multiplication"));
+    }
+
+    #[test]
+    fn rejects_integer_negation_overflow() {
+        let error = run("let min = 0 - 9223372036854775807 - 1\n-min\n")
+            .expect_err("negation overflow should fail");
+
+        assert!(error.message.contains("integer overflow in negation"));
+    }
+
+    #[test]
+    fn rejects_integer_division_overflow() {
+        let error = run("let min = 0 - 9223372036854775807 - 1\nmin / -1\n")
+            .expect_err("division overflow should fail");
+
+        assert!(error.message.contains("integer overflow in division"));
+    }
+
+    #[test]
+    fn rejects_integer_remainder_overflow() {
+        let error = run("let min = 0 - 9223372036854775807 - 1\nmin % -1\n")
+            .expect_err("remainder overflow should fail");
+
+        assert!(error.message.contains("integer overflow in remainder"));
     }
 
     #[test]
@@ -1065,6 +1392,51 @@ total
     }
 
     #[test]
+    fn supports_word_boolean_operators() {
+        let result = run("not false and false or true\n").expect("word booleans should run");
+
+        assert_eq!(result.last_value, Value::Bool(true));
+    }
+
+    #[test]
+    fn supports_elif_branches() {
+        let result = run(r#"
+fn label(value: i64) -> str:
+    if value < 0:
+        return "negative"
+    elif value == 0:
+        return "zero"
+    elif value == 1:
+        return "one"
+    else:
+        return "many"
+
+label(1)
+"#)
+        .expect("elif branches should run");
+
+        assert_eq!(result.last_value, Value::Str("one".to_owned()));
+    }
+
+    #[test]
+    fn supports_elif_if_expressions() {
+        let result = run(r#"
+let value = 0
+let label = if value < 0:
+    "negative"
+elif value == 0:
+    "zero"
+else:
+    "positive"
+
+label
+"#)
+        .expect("elif expression should run");
+
+        assert_eq!(result.last_value, Value::Str("zero".to_owned()));
+    }
+
+    #[test]
     fn rejects_failed_assertions() {
         let error =
             run("assert(false, \"expected failure\")\n").expect_err("assertion should fail");
@@ -1082,13 +1454,154 @@ struct Point:
 let points = [Point { x: 3, y: 4 }]
 
 assert(contains([1, 2, 3], 2))
-assert(!contains([1, 2, 3], 4))
+assert(not contains([1, 2, 3], 4))
 assert(contains("secure Fyr", "Fyr"))
 assert(contains(points, Point { x: 3, y: 4 }))
 "#)
         .expect("contains should run");
 
         assert_eq!(result.last_value, Value::Unit);
+    }
+
+    #[test]
+    fn supports_slice_for_arrays_and_strings() {
+        let result = run(r#"
+assert(slice([3, 5, 8, 13, 21], 1, 4) == [5, 8, 13])
+assert(slice([3, 5, 8], 2, 2) == [])
+assert(slice("secure Fyr", 0, 6) == "secure")
+assert(slice("Fyr", 1, 3) == "yr")
+"#)
+        .expect("slice should run");
+
+        assert_eq!(result.last_value, Value::Unit);
+    }
+
+    #[test]
+    fn supports_is_empty_for_arrays_and_strings() {
+        let result = run(r#"
+assert(is_empty([]))
+assert(not is_empty([1]))
+assert(is_empty(""))
+assert(not is_empty("Fyr"))
+"#)
+        .expect("is_empty should run");
+
+        assert_eq!(result.last_value, Value::Unit);
+    }
+
+    #[test]
+    fn supports_get_with_fallbacks() {
+        let result = run(r#"
+assert(get([3, 5, 8], 1, -1) == 5)
+assert(get([3, 5, 8], 9, -1) == -1)
+assert(get([3, 5, 8], -1, -1) == -1)
+assert(get([], 0, 42) == 42)
+assert(get("Fyr", 1, "?") == "y")
+assert(get("Fyr", 9, "?") == "?")
+"#)
+        .expect("get should run");
+
+        assert_eq!(result.last_value, Value::Unit);
+    }
+
+    #[test]
+    fn supports_find_for_arrays_and_strings() {
+        let result = run(r#"
+struct Point:
+    x: i64
+    y: i64
+
+let points = [Point { x: 3, y: 4 }, Point { x: 5, y: 12 }]
+
+assert(find([3, 5, 8], 5) == 1)
+assert(find([3, 5, 8], 21) == -1)
+assert(find([], 21) == -1)
+assert(find(points, Point { x: 5, y: 12 }) == 1)
+assert(find("secure Fyr", "Fyr") == 7)
+assert(find("secure Fyr", "missing") == -1)
+"#)
+        .expect("find should run");
+
+        assert_eq!(result.last_value, Value::Unit);
+    }
+
+    #[test]
+    fn supports_count_for_arrays_and_strings() {
+        let result = run(r#"
+struct Point:
+    x: i64
+    y: i64
+
+let points = [Point { x: 3, y: 4 }, Point { x: 3, y: 4 }, Point { x: 5, y: 12 }]
+
+assert(count([3, 5, 3, 8, 3], 3) == 3)
+assert(count([3, 5, 8], 21) == 0)
+assert(count([], 21) == 0)
+assert(count(points, Point { x: 3, y: 4 }) == 2)
+assert(count("secure Fyr secure", "secure") == 2)
+assert(count("aaaa", "aa") == 2)
+assert(count("secure Fyr", "missing") == 0)
+assert(count("Fyr", "") == 0)
+"#)
+        .expect("count should run");
+
+        assert_eq!(result.last_value, Value::Unit);
+    }
+
+    #[test]
+    fn rejects_find_runtime_type_errors() {
+        let collection = run("find(42, 1)\n").expect_err("find collection should fail");
+        assert!(collection.message.contains("find expects an array or str"));
+
+        let needle = run("find(\"Fyr\", 1)\n").expect_err("find string needle should fail");
+        assert!(needle.message.contains("find(str, value) expected str"));
+    }
+
+    #[test]
+    fn rejects_count_runtime_type_errors() {
+        let collection = run("count(42, 1)\n").expect_err("count collection should fail");
+        assert!(collection.message.contains("count expects an array or str"));
+
+        let needle = run("count(\"Fyr\", 1)\n").expect_err("count string needle should fail");
+        assert!(needle.message.contains("count(str, value) expected str"));
+    }
+
+    #[test]
+    fn rejects_get_runtime_type_errors() {
+        let collection = run("get(42, 0, 1)\n").expect_err("get collection should fail");
+        assert!(collection.message.contains("get expects an array or str"));
+
+        let index = run("get([1, 2, 3], true, 0)\n").expect_err("get index should fail");
+        assert!(index.message.contains("get index expected i64"));
+    }
+
+    #[test]
+    fn rejects_is_empty_runtime_type_errors() {
+        let error = run("is_empty(42)\n").expect_err("is_empty collection should fail");
+
+        assert!(error.message.contains("is_empty expects an array or str"));
+    }
+
+    #[test]
+    fn rejects_slice_bounds_errors() {
+        let negative_start =
+            run("slice([1, 2, 3], -1, 2)\n").expect_err("negative start should fail");
+        assert!(negative_start.message.contains("slice start must be >= 0"));
+
+        let reversed = run("slice([1, 2, 3], 2, 1)\n").expect_err("reversed slice should fail");
+        assert!(reversed.message.contains("must be <= end"));
+
+        let too_far = run("slice(\"Fyr\", 0, 4)\n").expect_err("oversized end should fail");
+        assert!(too_far.message.contains("slice end 4 out of bounds"));
+    }
+
+    #[test]
+    fn rejects_slice_runtime_type_errors() {
+        let start = run("slice([1, 2, 3], true, 2)\n").expect_err("start type should fail");
+        assert!(start.message.contains("slice start expected i64"));
+
+        let collection = run("slice(42, 0, 1)\n").expect_err("collection type should fail");
+        assert!(collection.message.contains("slice expects an array or str"));
     }
 
     #[test]
@@ -1170,6 +1683,35 @@ left + right
                 Value::Int(4)
             ])
         );
+    }
+
+    #[test]
+    fn appends_to_arrays() {
+        let result = run(r#"
+let values = append(append([], 3), 5)
+let values = append(values, 8)
+let values = append(values, 13)
+append(values, 21)
+"#)
+        .expect("append should run");
+
+        assert_eq!(
+            result.last_value,
+            Value::Array(vec![
+                Value::Int(3),
+                Value::Int(5),
+                Value::Int(8),
+                Value::Int(13),
+                Value::Int(21)
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_append_runtime_type_errors() {
+        let error = run("append(42, 1)\n").expect_err("append collection should fail");
+
+        assert!(error.message.contains("append expects an array"));
     }
 
     #[test]

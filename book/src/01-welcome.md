@@ -40,6 +40,8 @@ while i <= 10:
 print(total)
 ```
 
+Integer arithmetic is checked. Overflow, division by zero, and remainder by zero stop the program instead of wrapping.
+
 Functions can return early:
 
 ```fyr
@@ -50,6 +52,20 @@ fn first_multiple_of_seven(limit: i64) -> i64:
             return i
         i = i + 1
     return -1
+```
+
+Use `elif` when a branch has several named cases:
+
+```fyr
+fn size_label(value: i64) -> str:
+    if value < 0:
+        return "negative"
+    elif value == 0:
+        return "zero"
+    elif value == 1:
+        return "one"
+    else:
+        return "many"
 ```
 
 Structs name the shape of data:
@@ -73,10 +89,19 @@ fn sum(values: [i64]) -> i64:
     return total
 
 let values = [3, 5, 8, 13]
-let more_values = values + [21]
+let more_values = append(values, 21)
+let middle_values = slice(more_values, 1, 4)
+let safe_missing = get(more_values, 99, -1)
+let found_index = find(more_values, 13)
+let value_count = count(more_values, 13)
 let empty: [i64] = []
 print(sum(more_values))
+print(middle_values)
+print(safe_missing)
+print(found_index)
+print(value_count)
 print(len(empty))
+print(is_empty(empty))
 ```
 
 For counted loops, use `range`. The end is not included:
@@ -101,7 +126,19 @@ Assertions turn ordinary Fyr files into tests:
 ```fyr
 assert(range(5)[4] == 4)
 assert(contains([3, 5, 8, 13], 8))
+assert(is_empty([]))
+assert(append([3, 5, 8], 13) == [3, 5, 8, 13])
+assert(slice([3, 5, 8, 13], 1, 3) == [5, 8])
+assert(get([3, 5, 8], 99, -1) == -1)
+assert(find([3, 5, 8], 8) == 2)
+assert(count([3, 5, 3, 8, 3], 3) == 3)
+assert(not contains([3, 5, 8, 13], 21))
 assert(contains("secure Fyr", "Fyr"))
+assert(slice("secure Fyr", 0, 6) == "secure")
+assert(get("Fyr", 1, "?") == "y")
+assert(find("secure Fyr", "Fyr") == 7)
+assert(count("secure Fyr secure", "secure") == 2)
+assert(is_empty(""))
 assert([1, 2, 3] == [1, 2, 3])
 assert(total == 55, "total should match the counted loop")
 ```
