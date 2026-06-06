@@ -1,0 +1,8 @@
+# Fyr bootstrap example.
+let language = "Fyr"
+let speed = 40 + 2
+
+print("Hello from " + language)
+print(speed)
+print(type(speed))
+

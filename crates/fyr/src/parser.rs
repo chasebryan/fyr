@@ -1,0 +1,462 @@
+use crate::ast::{BinaryOp, Expr, Program, Statement, UnaryOp};
+use crate::diagnostic::{FyrError, FyrResult};
+use crate::lexer::{Token, TokenKind};
+
+pub fn parse(tokens: &[Token]) -> FyrResult<Program> {
+    Parser::new(tokens).parse()
+}
+
+struct Parser<'a> {
+    tokens: &'a [Token],
+    current: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn new(tokens: &'a [Token]) -> Self {
+        Self { tokens, current: 0 }
+    }
+
+    fn parse(mut self) -> FyrResult<Program> {
+        let mut statements = Vec::new();
+
+        self.skip_newlines();
+        while !self.is_at_end() {
+            statements.push(self.statement()?);
+            self.consume_statement_separator()?;
+        }
+
+        Ok(Program { statements })
+    }
+
+    fn statement(&mut self) -> FyrResult<Statement> {
+        if self.match_kind(&TokenKind::Let) {
+            return self.let_statement();
+        }
+
+        if self.match_kind(&TokenKind::Fn) {
+            return self.fn_statement();
+        }
+
+        Ok(Statement::Expr(self.expression()?))
+    }
+
+    fn let_statement(&mut self) -> FyrResult<Statement> {
+        let name = match &self.advance().kind {
+            TokenKind::Identifier(name) => name.clone(),
+            _ => {
+                return Err(FyrError::new(
+                    "expected an identifier after 'let'",
+                    self.previous().span,
+                ));
+            }
+        };
+
+        self.consume(&TokenKind::Equal, "expected '=' after binding name")?;
+        let value = self.expression()?;
+
+        Ok(Statement::Let { name, value })
+    }
+
+    fn fn_statement(&mut self) -> FyrResult<Statement> {
+        let name = match &self.advance().kind {
+            TokenKind::Identifier(name) => name.clone(),
+            _ => {
+                return Err(FyrError::new(
+                    "expected a function name after 'fn'",
+                    self.previous().span,
+                ));
+            }
+        };
+
+        self.consume(&TokenKind::LParen, "expected '(' after function name")?;
+        let params = self.parameter_list()?;
+        self.consume(&TokenKind::RParen, "expected ')' after function parameters")?;
+        self.consume(&TokenKind::Colon, "expected ':' before function body")?;
+        let body = self.block("function body")?;
+
+        Ok(Statement::Fn { name, params, body })
+    }
+
+    fn parameter_list(&mut self) -> FyrResult<Vec<String>> {
+        let mut params = Vec::new();
+
+        if self.check(&TokenKind::RParen) {
+            return Ok(params);
+        }
+
+        loop {
+            let token = self.advance();
+            match &token.kind {
+                TokenKind::Identifier(name) => params.push(name.clone()),
+                _ => {
+                    return Err(FyrError::new(
+                        "expected a parameter name",
+                        self.previous().span,
+                    ));
+                }
+            }
+
+            if !self.match_kind(&TokenKind::Comma) {
+                break;
+            }
+        }
+
+        Ok(params)
+    }
+
+    fn expression(&mut self) -> FyrResult<Expr> {
+        if self.match_kind(&TokenKind::If) {
+            return self.if_expression();
+        }
+
+        self.or()
+    }
+
+    fn if_expression(&mut self) -> FyrResult<Expr> {
+        let condition = self.or()?;
+        self.consume(&TokenKind::Colon, "expected ':' after if condition")?;
+        let then_branch = self.block("if body")?;
+
+        self.skip_newlines();
+        self.consume(&TokenKind::Else, "expected 'else' branch for if expression")?;
+        self.consume(&TokenKind::Colon, "expected ':' after else")?;
+        let else_branch = self.block("else body")?;
+
+        Ok(Expr::If {
+            condition: Box::new(condition),
+            then_branch,
+            else_branch,
+        })
+    }
+
+    fn or(&mut self) -> FyrResult<Expr> {
+        let mut expr = self.and()?;
+
+        while self.match_kind(&TokenKind::OrOr) {
+            let right = self.and()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::Or,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn and(&mut self) -> FyrResult<Expr> {
+        let mut expr = self.equality()?;
+
+        while self.match_kind(&TokenKind::AndAnd) {
+            let right = self.equality()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::And,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn equality(&mut self) -> FyrResult<Expr> {
+        let mut expr = self.comparison()?;
+
+        while let Some(op) = self.match_binary(&[
+            (TokenKind::EqualEqual, BinaryOp::Equal),
+            (TokenKind::BangEqual, BinaryOp::NotEqual),
+        ]) {
+            let right = self.comparison()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn comparison(&mut self) -> FyrResult<Expr> {
+        let mut expr = self.term()?;
+
+        while let Some(op) = self.match_binary(&[
+            (TokenKind::Less, BinaryOp::Less),
+            (TokenKind::LessEqual, BinaryOp::LessEqual),
+            (TokenKind::Greater, BinaryOp::Greater),
+            (TokenKind::GreaterEqual, BinaryOp::GreaterEqual),
+        ]) {
+            let right = self.term()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn term(&mut self) -> FyrResult<Expr> {
+        let mut expr = self.factor()?;
+
+        while let Some(op) = self.match_binary(&[
+            (TokenKind::Plus, BinaryOp::Add),
+            (TokenKind::Minus, BinaryOp::Subtract),
+        ]) {
+            let right = self.factor()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn factor(&mut self) -> FyrResult<Expr> {
+        let mut expr = self.unary()?;
+
+        while let Some(op) = self.match_binary(&[
+            (TokenKind::Star, BinaryOp::Multiply),
+            (TokenKind::Slash, BinaryOp::Divide),
+            (TokenKind::Percent, BinaryOp::Remainder),
+        ]) {
+            let right = self.unary()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn unary(&mut self) -> FyrResult<Expr> {
+        if self.match_kind(&TokenKind::Bang) {
+            let expr = self.unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(expr),
+            });
+        }
+
+        if self.match_kind(&TokenKind::Minus) {
+            let expr = self.unary()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Negate,
+                expr: Box::new(expr),
+            });
+        }
+
+        self.call()
+    }
+
+    fn call(&mut self) -> FyrResult<Expr> {
+        let mut expr = self.primary()?;
+
+        loop {
+            if !self.match_kind(&TokenKind::LParen) {
+                break;
+            }
+
+            let Expr::Variable(callee) = expr else {
+                return Err(FyrError::new(
+                    "only named functions can be called in Fyr bootstrap",
+                    self.previous().span,
+                ));
+            };
+
+            let mut args = Vec::new();
+            if !self.check(&TokenKind::RParen) {
+                loop {
+                    args.push(self.expression()?);
+                    if !self.match_kind(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+
+            self.consume(&TokenKind::RParen, "expected ')' after function arguments")?;
+            expr = Expr::Call { callee, args };
+        }
+
+        Ok(expr)
+    }
+
+    fn primary(&mut self) -> FyrResult<Expr> {
+        let token = self.advance();
+
+        match &token.kind {
+            TokenKind::Int(value) => Ok(Expr::Int(*value)),
+            TokenKind::Str(value) => Ok(Expr::Str(value.clone())),
+            TokenKind::True => Ok(Expr::Bool(true)),
+            TokenKind::False => Ok(Expr::Bool(false)),
+            TokenKind::Identifier(name) => Ok(Expr::Variable(name.clone())),
+            TokenKind::LParen => {
+                let expr = self.expression()?;
+                self.consume(&TokenKind::RParen, "expected ')' after expression")?;
+                Ok(expr)
+            }
+            _ => Err(FyrError::new("expected an expression", token.span)),
+        }
+    }
+
+    fn match_binary(&mut self, choices: &[(TokenKind, BinaryOp)]) -> Option<BinaryOp> {
+        for (kind, op) in choices {
+            if self.match_kind(kind) {
+                return Some(*op);
+            }
+        }
+
+        None
+    }
+
+    fn consume_statement_separator(&mut self) -> FyrResult<()> {
+        if self.is_at_end() {
+            return Ok(());
+        }
+
+        if self.previous_is(&TokenKind::Dedent) || self.check(&TokenKind::Dedent) {
+            return Ok(());
+        }
+
+        if self.match_kind(&TokenKind::Newline) {
+            self.skip_newlines();
+            return Ok(());
+        }
+
+        Err(FyrError::new(
+            "expected a newline after statement",
+            self.peek().span,
+        ))
+    }
+
+    fn block(&mut self, label: &str) -> FyrResult<Vec<Statement>> {
+        self.consume(&TokenKind::Newline, "expected a newline before block")?;
+        self.consume(&TokenKind::Indent, "expected an indented block")?;
+        self.skip_newlines();
+
+        let mut statements = Vec::new();
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            statements.push(self.statement()?);
+            self.consume_statement_separator()?;
+        }
+
+        if statements.is_empty() {
+            return Err(FyrError::new(
+                format!("expected at least one statement in {label}"),
+                self.peek().span,
+            ));
+        }
+
+        self.consume(&TokenKind::Dedent, "expected the block to dedent")?;
+        Ok(statements)
+    }
+
+    fn skip_newlines(&mut self) {
+        while self.match_kind(&TokenKind::Newline) {}
+    }
+
+    fn consume(&mut self, kind: &TokenKind, message: &str) -> FyrResult<()> {
+        if self.match_kind(kind) {
+            Ok(())
+        } else {
+            Err(FyrError::new(message, self.peek().span))
+        }
+    }
+
+    fn match_kind(&mut self, kind: &TokenKind) -> bool {
+        if self.check(kind) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn check(&self, kind: &TokenKind) -> bool {
+        if self.is_at_end() {
+            return matches!(kind, TokenKind::Eof);
+        }
+
+        discriminant_eq(&self.peek().kind, kind)
+    }
+
+    fn previous_is(&self, kind: &TokenKind) -> bool {
+        self.current > 0 && discriminant_eq(&self.previous().kind, kind)
+    }
+
+    fn advance(&mut self) -> &'a Token {
+        if !self.is_at_end() {
+            self.current += 1;
+        }
+        self.previous()
+    }
+
+    fn is_at_end(&self) -> bool {
+        matches!(self.peek().kind, TokenKind::Eof)
+    }
+
+    fn peek(&self) -> &'a Token {
+        &self.tokens[self.current]
+    }
+
+    fn previous(&self) -> &'a Token {
+        &self.tokens[self.current - 1]
+    }
+}
+
+fn discriminant_eq(left: &TokenKind, right: &TokenKind) -> bool {
+    std::mem::discriminant(left) == std::mem::discriminant(right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+
+    #[test]
+    fn parses_let_statement() {
+        let tokens = lex("let speed = 3 * 14\n").expect("lexing should pass");
+        let program = parse(&tokens).expect("parsing should pass");
+
+        assert_eq!(program.statements.len(), 1);
+        assert!(matches!(program.statements[0], Statement::Let { .. }));
+    }
+
+    #[test]
+    fn preserves_operator_precedence() {
+        let tokens = lex("1 + 2 * 3\n").expect("lexing should pass");
+        let program = parse(&tokens).expect("parsing should pass");
+
+        let Statement::Expr(Expr::Binary { op, .. }) = &program.statements[0] else {
+            panic!("expected binary expression");
+        };
+
+        assert_eq!(*op, BinaryOp::Add);
+    }
+
+    #[test]
+    fn parses_functions_with_if_expression() {
+        let tokens = lex(r#"
+fn fib(n):
+    if n < 2:
+        n
+    else:
+        fib(n - 1) + fib(n - 2)
+"#)
+        .expect("lexing should pass");
+        let program = parse(&tokens).expect("parsing should pass");
+
+        let Statement::Fn { name, params, body } = &program.statements[0] else {
+            panic!("expected function statement");
+        };
+
+        assert_eq!(name, "fib");
+        assert_eq!(params, &vec!["n".to_owned()]);
+        assert!(matches!(body[0], Statement::Expr(Expr::If { .. })));
+    }
+}
