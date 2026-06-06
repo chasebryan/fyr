@@ -20,8 +20,8 @@ cargo run -p fyr -- run examples/control.fyr
 cargo run -p fyr -- run examples/point.fyr
 cargo run -p fyr -- run examples/arrays.fyr
 cargo run -p fyr -- run examples/range.fyr
-cargo run -p fyr -- check examples/hello.fyr
-cargo run -p fyr -- test examples/assertions.fyr
+cargo run -p fyr -- check examples
+cargo run -p fyr -- test examples
 cargo run -p fyr
 ```
 
@@ -38,9 +38,12 @@ Then it can run from any path:
 ```sh
 fyr doctor
 fyr run /absolute/path/to/file.fyr
-fyr test /absolute/path/to/test.fyr
+fyr check /absolute/path/to/file-or-dir
+fyr test /absolute/path/to/test-file-or-dir
 fyr
 ```
+
+Directory inputs are searched recursively for `.fyr` files.
 
 Inside the REPL:
 
@@ -135,6 +138,8 @@ Assertions make Fyr files testable:
 
 ```fyr
 assert(sum([3, 5, 8, 13]) == 29, "sum should add every element")
+assert(contains([3, 5, 8, 13], 8))
+assert(contains("secure Fyr", "Fyr"))
 assert([1, 2, 3] == [1, 2, 3])
 assert(range(5)[4] == 4)
 ```
@@ -142,7 +147,7 @@ assert(range(5)[4] == 4)
 Run assertion files with:
 
 ```sh
-fyr test examples/assertions.fyr
+fyr test examples
 ```
 
 ## Current Language Slice
@@ -164,7 +169,7 @@ The bootstrap supports:
 - `return`, `break`, and `continue`
 - `struct` declarations, struct literals, and field access
 - homogeneous array literals, `[T]` annotations, typed empty arrays, concatenation with `+`, checked indexing, and `len(array)`
-- built-in `print(value)`, `type(value)`, `len(value)`, end-exclusive `range(...)`, and `assert(...)`
+- built-in `print(value)`, `type(value)`, `len(value)`, `contains(value, item)`, end-exclusive `range(...)`, and `assert(...)`
 - `fyr test <file>` assertion-file execution
 - one-statement-per-line scripts
 

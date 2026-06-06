@@ -561,6 +561,44 @@ impl Checker {
 
                 Ok(Type::Unit)
             }
+            "contains" => {
+                if args.len() != 2 {
+                    return Err(type_error("contains expects exactly two arguments"));
+                }
+
+                let collection_type = self.check_expr(&args[0])?;
+                match collection_type {
+                    Type::Array(element) => {
+                        if !is_equatable_type(&element) {
+                            return Err(type_error(format!(
+                                "{element} cannot be checked with contains"
+                            )));
+                        }
+
+                        let found = self.check_expr_with_hint(&args[1], Some(&element))?;
+                        if found != *element {
+                            return Err(type_error(format!(
+                                "contains expected {element}, found {found}"
+                            )));
+                        }
+
+                        Ok(Type::Bool)
+                    }
+                    Type::Str => {
+                        let found = self.check_expr(&args[1])?;
+                        if found != Type::Str {
+                            return Err(type_error(format!(
+                                "contains(str, value) expected str, found {found}"
+                            )));
+                        }
+
+                        Ok(Type::Bool)
+                    }
+                    found => Err(type_error(format!(
+                        "contains expects an array or str, found {found}"
+                    ))),
+                }
+            }
             "print" => {
                 if args.len() != 1 {
                     return Err(type_error("print expects exactly one argument"));
@@ -1183,6 +1221,40 @@ total
         let error = typecheck("assert(true, 1)\n").expect_err("assert message should fail");
 
         assert!(error.message.contains("assert message expected str"));
+    }
+
+    #[test]
+    fn accepts_contains() {
+        typecheck(
+            r#"
+struct Point:
+    x: i64
+    y: i64
+
+let points = [Point { x: 3, y: 4 }]
+
+assert(contains([1, 2, 3], 2))
+assert(contains("secure Fyr", "Fyr"))
+assert(contains(points, Point { x: 3, y: 4 }))
+"#,
+        )
+        .expect("contains should typecheck");
+    }
+
+    #[test]
+    fn rejects_contains_value_type_mismatch() {
+        let error =
+            typecheck("contains([1, 2, 3], true)\n").expect_err("contains mismatch should fail");
+
+        assert!(error.message.contains("contains expected i64"));
+    }
+
+    #[test]
+    fn rejects_contains_string_needle_type_mismatch() {
+        let error =
+            typecheck("contains(\"fyr\", 1)\n").expect_err("contains string mismatch should fail");
+
+        assert!(error.message.contains("contains(str, value) expected str"));
     }
 
     #[test]

@@ -100,6 +100,8 @@ Assertions turn ordinary Fyr files into tests:
 
 ```fyr
 assert(range(5)[4] == 4)
+assert(contains([3, 5, 8, 13], 8))
+assert(contains("secure Fyr", "Fyr"))
 assert([1, 2, 3] == [1, 2, 3])
 assert(total == 55, "total should match the counted loop")
 ```
@@ -107,7 +109,9 @@ assert(total == 55, "total should match the counted loop")
 Run them with:
 
 ```sh
-fyr test examples/assertions.fyr
+fyr test examples
 ```
+
+When `fyr check` or `fyr test` receives a directory, it recursively finds `.fyr` files.
 
 The bootstrap version of Fyr is intentionally small. Each chapter of this book should track real language behavior as the compiler grows.

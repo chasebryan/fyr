@@ -420,6 +420,7 @@ impl Evaluator {
             }
             "range" => self.eval_range(args),
             "assert" => self.eval_assert(args),
+            "contains" => self.eval_contains(args),
             "print" => {
                 if args.len() != 1 {
                     return Err(runtime_error("print expects exactly one argument"));
@@ -442,6 +443,43 @@ impl Evaluator {
                 Ok(Flow::Value(Value::Str(value.type_name().to_owned())))
             }
             other => self.eval_user_call(other, args),
+        }
+    }
+
+    fn eval_contains(&mut self, args: &[Expr]) -> FyrResult<Flow> {
+        if args.len() != 2 {
+            return Err(runtime_error("contains expects exactly two arguments"));
+        }
+
+        let collection = match self.eval_expr_flow(&args[0])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        let needle = match self.eval_expr_flow(&args[1])? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+
+        match (collection, needle) {
+            (Value::Array(values), needle) => {
+                for value in &values {
+                    if values_equal(value, &needle)? {
+                        return Ok(Flow::Value(Value::Bool(true)));
+                    }
+                }
+                Ok(Flow::Value(Value::Bool(false)))
+            }
+            (Value::Str(value), Value::Str(needle)) => {
+                Ok(Flow::Value(Value::Bool(value.contains(&needle))))
+            }
+            (Value::Str(_), other) => Err(runtime_error(format!(
+                "contains(str, value) expected str, found {}",
+                other.type_name()
+            ))),
+            (other, _) => Err(runtime_error(format!(
+                "contains expects an array or str, found {}",
+                other.type_name()
+            ))),
         }
     }
 
@@ -1032,6 +1070,32 @@ total
             run("assert(false, \"expected failure\")\n").expect_err("assertion should fail");
 
         assert!(error.message.contains("assertion failed: expected failure"));
+    }
+
+    #[test]
+    fn supports_contains() {
+        let result = run(r#"
+struct Point:
+    x: i64
+    y: i64
+
+let points = [Point { x: 3, y: 4 }]
+
+assert(contains([1, 2, 3], 2))
+assert(!contains([1, 2, 3], 4))
+assert(contains("secure Fyr", "Fyr"))
+assert(contains(points, Point { x: 3, y: 4 }))
+"#)
+        .expect("contains should run");
+
+        assert_eq!(result.last_value, Value::Unit);
+    }
+
+    #[test]
+    fn rejects_contains_type_errors_at_runtime() {
+        let error = run("contains(\"fyr\", 1)\n").expect_err("contains should fail");
+
+        assert!(error.message.contains("contains(str, value) expected str"));
     }
 
     #[test]
