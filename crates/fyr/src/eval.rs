@@ -129,7 +129,10 @@ impl Evaluator {
         let mut last_value = Value::Unit;
 
         for statement in &program.statements {
-            if matches!(statement, Statement::Struct { .. } | Statement::Fn { .. }) {
+            if matches!(
+                statement,
+                Statement::Struct { .. } | Statement::Fn { .. } | Statement::Import { .. }
+            ) {
                 last_value = Value::Unit;
                 continue;
             }
@@ -164,22 +167,29 @@ impl Evaluator {
     }
 
     fn eval_statement_flow(&mut self, statement: &Statement) -> FyrResult<Flow> {
-        match statement {
-            Statement::Struct { name, fields } => {
+        let span = statement.span();
+        let source_path = statement.source_path();
+        let result = match statement {
+            Statement::Struct { name, fields, .. } => {
                 self.define_struct(name, fields)?;
                 Ok(Flow::Value(Value::Unit))
             }
-            Statement::Let { name, ty, value } => {
+            Statement::Import { .. } => Ok(Flow::Value(Value::Unit)),
+            Statement::Let {
+                name, ty, value, ..
+            } => {
                 let value = self.eval_value(value)?;
                 self.define_binding(name, ty, value, false)?;
                 Ok(Flow::Value(Value::Unit))
             }
-            Statement::Var { name, ty, value } => {
+            Statement::Var {
+                name, ty, value, ..
+            } => {
                 let value = self.eval_value(value)?;
                 self.define_binding(name, ty, value, true)?;
                 Ok(Flow::Value(Value::Unit))
             }
-            Statement::Assign { name, value } => {
+            Statement::Assign { name, value, .. } => {
                 let value = self.eval_value(value)?;
                 self.assign(name, value)?;
                 Ok(Flow::Value(Value::Unit))
@@ -189,37 +199,44 @@ impl Evaluator {
                 params,
                 return_type,
                 body,
+                ..
             } => {
                 self.define_function(name, params, return_type, body)?;
                 Ok(Flow::Value(Value::Unit))
             }
-            Statement::While { condition, body } => self.eval_while(condition, body),
+            Statement::While {
+                condition, body, ..
+            } => self.eval_while(condition, body),
             Statement::For {
                 name,
                 iterable,
                 body,
+                ..
             } => self.eval_for(name, iterable, body),
             Statement::If {
                 condition,
                 then_branch,
                 else_branch,
+                ..
             } => self.eval_if(condition, then_branch, else_branch),
-            Statement::Return { value } => {
+            Statement::Return { value, .. } => {
                 let value = match value {
                     Some(value) => self.eval_value(value)?,
                     None => Value::Unit,
                 };
                 Ok(Flow::Return(value))
             }
-            Statement::Break => Ok(Flow::Break),
-            Statement::Continue => Ok(Flow::Continue),
-            Statement::Expr(expr) => self.eval_expr_flow(expr),
-        }
+            Statement::Break { .. } => Ok(Flow::Break),
+            Statement::Continue { .. } => Ok(Flow::Continue),
+            Statement::Expr { expr, .. } => self.eval_expr_flow(expr),
+        };
+
+        result.map_err(|error| error.with_fallback_location(span, source_path))
     }
 
     fn predefine_structs(&mut self, statements: &[Statement]) -> FyrResult<()> {
         for statement in statements {
-            if let Statement::Struct { name, fields } = statement {
+            if let Statement::Struct { name, fields, .. } = statement {
                 self.define_struct(name, fields)?;
             }
         }
@@ -234,6 +251,7 @@ impl Evaluator {
                 params,
                 return_type,
                 body,
+                ..
             } = statement
             {
                 self.define_function(name, params, return_type, body)?;
@@ -1784,6 +1802,17 @@ mod tests {
         let tokens = lex(source)?;
         let program = parse(&tokens)?;
         Evaluator::new().run(&program)
+    }
+
+    #[test]
+    fn runtime_errors_use_statement_spans() {
+        let error = run(r#"
+1 / 0
+"#)
+        .expect_err("division by zero should fail");
+
+        assert!(error.message.contains("division by zero"));
+        assert_eq!((error.line, error.column), (2, 1));
     }
 
     #[test]

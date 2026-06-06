@@ -27,6 +27,45 @@ Accepted bindings stay available until the session is reset or closed. The REPL 
 
 `:load` runs a Fyr file in the current session, so you can load helpers and then keep experimenting. Top-level functions are predeclared inside each submitted chunk, matching normal source-file behavior.
 
+When you want a project instead of a loose file, create one:
+
+```sh
+fyr new hello-fyr
+cd hello-fyr
+fyr run
+fyr check
+fyr test
+fyr fmt --check
+fyr build
+```
+
+The project manifest is `fyr.toml`:
+
+```toml
+name = "hello-fyr"
+main = "src/main.fyr"
+```
+
+Inside a project, `fyr run` uses the manifest `main` file. `fyr check` and `fyr fmt` default to project sources plus tests, and `fyr test` defaults to the project `tests` directory.
+
+Use imports when a project grows beyond one file:
+
+```fyr
+import "lib.fyr"
+print(greeting("Fyr"))
+```
+
+Imports use relative `.fyr` paths. The command resolves imports before typechecking and running, catches import cycles, reports syntax failures with the source file path, and keeps imported statement locations for type and runtime diagnostics. File-backed diagnostics also show nearby source lines with a caret underline. It only includes the same imported file once for each root file. Inside a project, imports stay inside the nearest `fyr.toml` project root.
+
+`fyr build` writes a checked, import-flattened Fyr source bundle:
+
+```sh
+fyr build
+fyr run build/main.fyr
+```
+
+The bootstrap build output is still Fyr source. Later compiler stages will turn the same project shape toward native artifacts.
+
 Fyr functions use typed signatures and indented bodies:
 
 ```fyr

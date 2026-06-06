@@ -42,26 +42,34 @@ impl Formatter {
     fn statement(&mut self, statement: &Statement, indent: usize) {
         self.write_indent(indent);
         match statement {
-            Statement::Let { name, ty, value } => {
+            Statement::Let {
+                name, ty, value, ..
+            } => {
                 self.output.push_str("let ");
                 self.output.push_str(name);
                 self.optional_type(ty);
                 self.output.push_str(" = ");
                 self.expr(value, 0, indent);
             }
-            Statement::Var { name, ty, value } => {
+            Statement::Var {
+                name, ty, value, ..
+            } => {
                 self.output.push_str("var ");
                 self.output.push_str(name);
                 self.optional_type(ty);
                 self.output.push_str(" = ");
                 self.expr(value, 0, indent);
             }
-            Statement::Assign { name, value } => {
+            Statement::Assign { name, value, .. } => {
                 self.output.push_str(name);
                 self.output.push_str(" = ");
                 self.expr(value, 0, indent);
             }
-            Statement::Struct { name, fields } => {
+            Statement::Import { path, .. } => {
+                self.output.push_str("import ");
+                self.string(path);
+            }
+            Statement::Struct { name, fields, .. } => {
                 self.output.push_str("struct ");
                 self.output.push_str(name);
                 self.output.push_str(":\n");
@@ -80,6 +88,7 @@ impl Formatter {
                 params,
                 return_type,
                 body,
+                ..
             } => {
                 self.output.push_str("fn ");
                 self.output.push_str(name);
@@ -93,7 +102,9 @@ impl Formatter {
                 self.output.push_str(":\n");
                 self.statements(body, indent + 1);
             }
-            Statement::While { condition, body } => {
+            Statement::While {
+                condition, body, ..
+            } => {
                 self.output.push_str("while ");
                 self.expr(condition, 0, indent);
                 self.output.push_str(":\n");
@@ -103,6 +114,7 @@ impl Formatter {
                 name,
                 iterable,
                 body,
+                ..
             } => {
                 self.output.push_str("for ");
                 self.output.push_str(name);
@@ -115,19 +127,20 @@ impl Formatter {
                 condition,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 self.if_statement(condition, then_branch, else_branch, indent, "if");
             }
-            Statement::Return { value } => {
+            Statement::Return { value, .. } => {
                 self.output.push_str("return");
                 if let Some(value) = value {
                     self.output.push(' ');
                     self.expr(value, 0, indent);
                 }
             }
-            Statement::Break => self.output.push_str("break"),
-            Statement::Continue => self.output.push_str("continue"),
-            Statement::Expr(expr) => self.expr(expr, 0, indent),
+            Statement::Break { .. } => self.output.push_str("break"),
+            Statement::Continue { .. } => self.output.push_str("continue"),
+            Statement::Expr { expr, .. } => self.expr(expr, 0, indent),
         }
     }
 
@@ -155,6 +168,7 @@ impl Formatter {
                     condition,
                     then_branch,
                     else_branch,
+                    ..
                 },
             ] => {
                 self.output.push('\n');
@@ -569,6 +583,13 @@ print(values[0])
             formatted,
             "let answer = 40 + 2 * 3\nvar values: [i64] = [1, 2, 3]\nprint(values[0])\n"
         );
+    }
+
+    #[test]
+    fn formats_imports() {
+        let formatted = format_source("import   \"lib.fyr\"\n").expect("formatting should pass");
+
+        assert_eq!(formatted, "import \"lib.fyr\"\n");
     }
 
     #[test]

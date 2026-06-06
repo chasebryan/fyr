@@ -21,6 +21,7 @@ cargo run -p fyr -- run examples/point.fyr
 cargo run -p fyr -- run examples/arrays.fyr
 cargo run -p fyr -- run examples/range.fyr
 cargo run -p fyr -- run examples/strings.fyr
+cargo run -p fyr -- run examples/project/src/main.fyr
 cargo run -p fyr -- check examples
 cargo run -p fyr -- fmt --check examples
 cargo run -p fyr -- test examples
@@ -39,6 +40,13 @@ Then it can run from any path:
 
 ```sh
 fyr doctor
+fyr new hello-fyr
+cd hello-fyr
+fyr run
+fyr check
+fyr fmt --check
+fyr test
+fyr build
 fyr run /absolute/path/to/file.fyr
 fyr check /absolute/path/to/file-or-dir
 fyr fmt --check /absolute/path/to/file-or-dir
@@ -49,6 +57,55 @@ fyr
 
 Directory inputs are searched recursively for `.fyr` files.
 The bootstrap formatter writes files in place by default and checks without writing when passed `--check`; it preserves line comments while canonicalizing spacing, indentation, and expression layout.
+
+## Start a Project
+
+Create a project in a new directory:
+
+```sh
+fyr new hello-fyr
+cd hello-fyr
+fyr run
+fyr check
+fyr test
+fyr fmt --check
+fyr build
+```
+
+`fyr init` writes the same files into the current directory or a directory you pass:
+
+```sh
+fyr init
+fyr init tools/demo
+```
+
+A Fyr project has a small `fyr.toml` manifest:
+
+```toml
+name = "hello-fyr"
+main = "src/main.fyr"
+```
+
+When run inside a project, `fyr run` uses the manifest `main` file, `fyr check` and `fyr fmt` default to project sources plus tests, and `fyr test` defaults to the project `tests` directory.
+
+Split project code across files with relative imports:
+
+```fyr
+import "lib.fyr"
+print(greeting("Fyr"))
+```
+
+Import paths are string literals that must be relative `.fyr` files. The CLI resolves imports before typechecking or running, detects cycles, and includes repeated imports once per root file. Syntax and formatting errors include the file path that failed, including imported files; type and runtime errors fall back to the original source statement location, including imported statements. File-backed diagnostics include nearby source lines with a caret underline when the source is available. Inside a project, imports are confined to the nearest `fyr.toml` project root.
+
+Build a project into a checked, import-flattened Fyr bundle:
+
+```sh
+fyr build
+fyr build --out dist/app.fyr
+fyr run build/main.fyr
+```
+
+For a project, the default output is `build/main.fyr`. For a loose input file, `fyr build src/main.fyr` writes `src/main.bundle.fyr` unless `--out` is passed. This bootstrap build artifact is still Fyr source; native code generation remains a later compiler layer.
 
 Inside the REPL:
 
@@ -269,8 +326,12 @@ The bootstrap supports:
 - `struct` declarations, struct literals, and field access
 - homogeneous array literals, `[T]` annotations, typed empty arrays, append, reverse, first/last reads, concatenation with `+`, checked indexing, fallback reads, checked slicing, search/count helpers, emptiness checks, and `len(array)`
 - checked string indexing, character iteration, concatenation, containment, slicing, fallback reads, search/count helpers, split/join helpers, trim/case helpers, prefix/suffix checks, replacement, reverse, first/last reads, emptiness checks, and `len(str)`
+- relative file imports with `import "path/to/file.fyr"` for multi-file programs and projects
 - built-in `print(value)`, `type(value)`, `len(value)`, `is_empty(value)`, `get(value, index, default)`, `first(value, default)`, `last(value, default)`, `reverse(value)`, `find(value, item)`, `count(value, item)`, `append(array, value)`, `contains(value, item)`, `slice(value, start, end)`, `split(text, separator)`, `join(parts, separator)`, `trim(text)`, `lower(text)`, `upper(text)`, `starts_with(text, prefix)`, `ends_with(text, suffix)`, `replace(text, old, new)`, end-exclusive `range(...)`, and `assert(...)`
 - a persistent terminal REPL with `:help`, `:load <file>`, `:history`, `:reset`, and `:quit`
+- `fyr init [dir]` and `fyr new <dir>` project scaffolding with `fyr.toml`, `src/main.fyr`, and `tests/main.fyr`
+- project-aware `fyr run`, `fyr check`, `fyr fmt`, and `fyr test` defaults when run below a `fyr.toml`
+- `fyr build [file]` checked, import-flattened Fyr bundle generation, with `--out <file>` for custom output
 - `fyr fmt <path...>` in-place formatting and `fyr fmt --check <path...>` formatting checks
 - `fyr test <path...>` assertion-file execution
 - one-statement-per-line scripts

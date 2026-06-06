@@ -142,7 +142,7 @@ impl ReplSession {
                 continue;
             }
 
-            let should_echo = echo_expressions && matches!(statement, Statement::Expr(_));
+            let should_echo = echo_expressions && matches!(statement, Statement::Expr { .. });
             let value = self.evaluator.eval_statement(&statement)?;
             lines.extend(self.evaluator.take_outputs());
 
@@ -223,7 +223,10 @@ fn parse_source(source: &str) -> FyrResult<Program> {
 }
 
 fn is_declaration(statement: &Statement) -> bool {
-    matches!(statement, Statement::Struct { .. } | Statement::Fn { .. })
+    matches!(
+        statement,
+        Statement::Struct { .. } | Statement::Fn { .. } | Statement::Import { .. }
+    )
 }
 
 fn ensure_trailing_newline(source: &str) -> String {

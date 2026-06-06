@@ -87,11 +87,15 @@ impl Checker {
 
     fn predeclare_structs(&mut self, statements: &[Statement]) -> FyrResult<()> {
         for statement in statements {
-            if let Statement::Struct { name, fields } = statement {
+            if let Statement::Struct { name, fields, .. } = statement {
+                let span = statement.span();
+                let source_path = statement.source_path();
                 if self.structs.contains_key(name) || self.current_scope().contains_key(name) {
-                    return Err(type_error(format!("struct '{name}' already exists")));
+                    return Err(type_error(format!("struct '{name}' already exists"))
+                        .with_fallback_location(span, source_path));
                 }
-                reject_duplicate_members("struct", name, "field", fields)?;
+                reject_duplicate_members("struct", name, "field", fields)
+                    .map_err(|error| error.with_fallback_location(span, source_path))?;
 
                 self.structs.insert(name.clone(), fields.clone());
             }
@@ -115,8 +119,13 @@ impl Checker {
                 ..
             } = statement
             {
-                let signature = self.function_signature(name, params, return_type)?;
-                self.define(name, signature, false)?;
+                let span = statement.span();
+                let source_path = statement.source_path();
+                let signature = self
+                    .function_signature(name, params, return_type)
+                    .map_err(|error| error.with_fallback_location(span, source_path))?;
+                self.define(name, signature, false)
+                    .map_err(|error| error.with_fallback_location(span, source_path))?;
             }
         }
 
@@ -124,11 +133,18 @@ impl Checker {
     }
 
     fn check_statement(&mut self, statement: &Statement) -> FyrResult<Type> {
-        match statement {
+        let span = statement.span();
+        let source_path = statement.source_path();
+        let result = match statement {
             Statement::Struct { .. } => Ok(Type::Unit),
-            Statement::Let { name, ty, value } => self.check_binding(name, ty, value, false),
-            Statement::Var { name, ty, value } => self.check_binding(name, ty, value, true),
-            Statement::Assign { name, value } => {
+            Statement::Import { .. } => Ok(Type::Unit),
+            Statement::Let {
+                name, ty, value, ..
+            } => self.check_binding(name, ty, value, false),
+            Statement::Var {
+                name, ty, value, ..
+            } => self.check_binding(name, ty, value, true),
+            Statement::Assign { name, value, .. } => {
                 let value_type = self.check_expr(value)?;
                 let binding = self
                     .lookup(name)
@@ -157,7 +173,9 @@ impl Checker {
                 body,
                 ..
             } => self.check_function_statement(name, params, return_type, body),
-            Statement::While { condition, body } => {
+            Statement::While {
+                condition, body, ..
+            } => {
                 self.check_while(condition, body)?;
                 Ok(Type::Unit)
             }
@@ -165,6 +183,7 @@ impl Checker {
                 name,
                 iterable,
                 body,
+                ..
             } => {
                 self.check_for(name, iterable, body)?;
                 Ok(Type::Unit)
@@ -173,22 +192,25 @@ impl Checker {
                 condition,
                 then_branch,
                 else_branch,
+                ..
             } => self.check_if_statement(condition, then_branch, else_branch),
-            Statement::Return { value } => self.check_return(value.as_ref()),
-            Statement::Break => {
+            Statement::Return { value, .. } => self.check_return(value.as_ref()),
+            Statement::Break { .. } => {
                 if self.loop_depth == 0 {
                     return Err(type_error("break outside loop"));
                 }
                 Ok(Type::Never)
             }
-            Statement::Continue => {
+            Statement::Continue { .. } => {
                 if self.loop_depth == 0 {
                     return Err(type_error("continue outside loop"));
                 }
                 Ok(Type::Never)
             }
-            Statement::Expr(expr) => self.check_expr(expr),
-        }
+            Statement::Expr { expr, .. } => self.check_expr(expr),
+        };
+
+        result.map_err(|error| error.with_fallback_location(span, source_path))
     }
 
     fn check_binding(
@@ -1291,6 +1313,34 @@ mod tests {
         let tokens = lex(source)?;
         let program = parse(&tokens)?;
         check(&program)
+    }
+
+    #[test]
+    fn type_errors_use_statement_spans() {
+        let error = typecheck(
+            r#"
+let value: i64 = false
+"#,
+        )
+        .expect_err("binding mismatch should fail");
+
+        assert!(error.message.contains("binding 'value' expected i64"));
+        assert_eq!((error.line, error.column), (2, 1));
+    }
+
+    #[test]
+    fn nested_type_errors_use_inner_statement_spans() {
+        let error = typecheck(
+            r#"
+fn broken(value: i64) -> i64:
+    let value: str = 3
+    return value
+"#,
+        )
+        .expect_err("inner mismatch should fail");
+
+        assert!(error.message.contains("binding 'value' expected str"));
+        assert_eq!((error.line, error.column), (3, 5));
     }
 
     #[test]

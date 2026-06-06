@@ -1,6 +1,7 @@
 use crate::ast::{BinaryOp, Expr, Param, Program, Statement, TypeName, UnaryOp};
 use crate::diagnostic::{FyrError, FyrResult};
 use crate::lexer::{Token, TokenKind};
+use crate::span::Span;
 
 pub fn parse(tokens: &[Token]) -> FyrResult<Program> {
     Parser::new(tokens).parse()
@@ -30,53 +31,68 @@ impl<'a> Parser<'a> {
 
     fn statement(&mut self) -> FyrResult<Statement> {
         if self.match_kind(&TokenKind::Let) {
-            return self.let_statement();
+            return self.let_statement(self.previous().span);
         }
 
         if self.match_kind(&TokenKind::Var) {
-            return self.var_statement();
+            return self.var_statement(self.previous().span);
         }
 
         if self.match_kind(&TokenKind::Fn) {
-            return self.fn_statement();
+            return self.fn_statement(self.previous().span);
         }
 
         if self.match_kind(&TokenKind::Struct) {
-            return self.struct_statement();
+            return self.struct_statement(self.previous().span);
+        }
+
+        if self.match_kind(&TokenKind::Import) {
+            return self.import_statement(self.previous().span);
         }
 
         if self.match_kind(&TokenKind::While) {
-            return self.while_statement();
+            return self.while_statement(self.previous().span);
         }
 
         if self.match_kind(&TokenKind::For) {
-            return self.for_statement();
+            return self.for_statement(self.previous().span);
         }
 
         if self.match_kind(&TokenKind::If) {
-            return self.if_statement();
+            return self.if_statement(self.previous().span);
         }
 
         if self.match_kind(&TokenKind::Return) {
-            return self.return_statement();
+            return self.return_statement(self.previous().span);
         }
 
         if self.match_kind(&TokenKind::Break) {
-            return Ok(Statement::Break);
+            return Ok(Statement::Break {
+                span: self.previous().span,
+                source_path: None,
+            });
         }
 
         if self.match_kind(&TokenKind::Continue) {
-            return Ok(Statement::Continue);
+            return Ok(Statement::Continue {
+                span: self.previous().span,
+                source_path: None,
+            });
         }
 
         if self.check_identifier_assignment() {
             return self.assignment_statement();
         }
 
-        Ok(Statement::Expr(self.expression()?))
+        let span = self.peek().span;
+        Ok(Statement::Expr {
+            expr: self.expression()?,
+            span,
+            source_path: None,
+        })
     }
 
-    fn let_statement(&mut self) -> FyrResult<Statement> {
+    fn let_statement(&mut self, span: Span) -> FyrResult<Statement> {
         let name = match &self.advance().kind {
             TokenKind::Identifier(name) => name.clone(),
             _ => {
@@ -91,10 +107,16 @@ impl<'a> Parser<'a> {
         self.consume(&TokenKind::Equal, "expected '=' after binding name")?;
         let value = self.expression()?;
 
-        Ok(Statement::Let { name, ty, value })
+        Ok(Statement::Let {
+            name,
+            ty,
+            value,
+            span,
+            source_path: None,
+        })
     }
 
-    fn var_statement(&mut self) -> FyrResult<Statement> {
+    fn var_statement(&mut self, span: Span) -> FyrResult<Statement> {
         let name = match &self.advance().kind {
             TokenKind::Identifier(name) => name.clone(),
             _ => {
@@ -109,11 +131,18 @@ impl<'a> Parser<'a> {
         self.consume(&TokenKind::Equal, "expected '=' after mutable binding name")?;
         let value = self.expression()?;
 
-        Ok(Statement::Var { name, ty, value })
+        Ok(Statement::Var {
+            name,
+            ty,
+            value,
+            span,
+            source_path: None,
+        })
     }
 
     fn assignment_statement(&mut self) -> FyrResult<Statement> {
-        let name = match &self.advance().kind {
+        let token = self.advance();
+        let name = match &token.kind {
             TokenKind::Identifier(name) => name.clone(),
             _ => unreachable!("caller checks assignment shape"),
         };
@@ -121,10 +150,15 @@ impl<'a> Parser<'a> {
         self.consume(&TokenKind::Equal, "expected '=' in assignment")?;
         let value = self.expression()?;
 
-        Ok(Statement::Assign { name, value })
+        Ok(Statement::Assign {
+            name,
+            value,
+            span: token.span,
+            source_path: None,
+        })
     }
 
-    fn fn_statement(&mut self) -> FyrResult<Statement> {
+    fn fn_statement(&mut self, span: Span) -> FyrResult<Statement> {
         let name = match &self.advance().kind {
             TokenKind::Identifier(name) => name.clone(),
             _ => {
@@ -151,10 +185,12 @@ impl<'a> Parser<'a> {
             params,
             return_type,
             body,
+            span,
+            source_path: None,
         })
     }
 
-    fn struct_statement(&mut self) -> FyrResult<Statement> {
+    fn struct_statement(&mut self, span: Span) -> FyrResult<Statement> {
         let name = match &self.advance().kind {
             TokenKind::Identifier(name) => name.clone(),
             _ => {
@@ -168,7 +204,30 @@ impl<'a> Parser<'a> {
         self.consume(&TokenKind::Colon, "expected ':' before struct fields")?;
         let fields = self.struct_fields()?;
 
-        Ok(Statement::Struct { name, fields })
+        Ok(Statement::Struct {
+            name,
+            fields,
+            span,
+            source_path: None,
+        })
+    }
+
+    fn import_statement(&mut self, span: Span) -> FyrResult<Statement> {
+        let path = match &self.advance().kind {
+            TokenKind::Str(path) => path.clone(),
+            _ => {
+                return Err(FyrError::new(
+                    "expected a string path after 'import'",
+                    self.previous().span,
+                ));
+            }
+        };
+
+        Ok(Statement::Import {
+            path,
+            span,
+            source_path: None,
+        })
     }
 
     fn struct_fields(&mut self) -> FyrResult<Vec<Param>> {
@@ -211,15 +270,20 @@ impl<'a> Parser<'a> {
         Ok(fields)
     }
 
-    fn while_statement(&mut self) -> FyrResult<Statement> {
+    fn while_statement(&mut self, span: Span) -> FyrResult<Statement> {
         let condition = self.or()?;
         self.consume(&TokenKind::Colon, "expected ':' after while condition")?;
         let body = self.block("while body")?;
 
-        Ok(Statement::While { condition, body })
+        Ok(Statement::While {
+            condition,
+            body,
+            span,
+            source_path: None,
+        })
     }
 
-    fn for_statement(&mut self) -> FyrResult<Statement> {
+    fn for_statement(&mut self, span: Span) -> FyrResult<Statement> {
         let name = match &self.advance().kind {
             TokenKind::Identifier(name) => name.clone(),
             _ => {
@@ -239,10 +303,12 @@ impl<'a> Parser<'a> {
             name,
             iterable,
             body,
+            span,
+            source_path: None,
         })
     }
 
-    fn if_statement(&mut self) -> FyrResult<Statement> {
+    fn if_statement(&mut self, span: Span) -> FyrResult<Statement> {
         let condition = self.or()?;
         self.consume(&TokenKind::Colon, "expected ':' after if condition")?;
         let then_branch = self.block("if body")?;
@@ -252,17 +318,23 @@ impl<'a> Parser<'a> {
             condition,
             then_branch,
             else_branch,
+            span,
+            source_path: None,
         })
     }
 
-    fn return_statement(&mut self) -> FyrResult<Statement> {
+    fn return_statement(&mut self, span: Span) -> FyrResult<Statement> {
         let value = if self.check_statement_boundary() {
             None
         } else {
             Some(self.expression()?)
         };
 
-        Ok(Statement::Return { value })
+        Ok(Statement::Return {
+            value,
+            span,
+            source_path: None,
+        })
     }
 
     fn parameter_list(&mut self) -> FyrResult<Vec<Param>> {
@@ -350,7 +422,7 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
 
         if self.match_kind(&TokenKind::Elif) {
-            return self.elif_tail(false);
+            return self.elif_tail(false, self.previous().span);
         }
 
         if self.match_kind(&TokenKind::Else) {
@@ -365,7 +437,7 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
 
         if self.match_kind(&TokenKind::Elif) {
-            return self.elif_tail(true);
+            return self.elif_tail(true, self.previous().span);
         }
 
         self.consume(&TokenKind::Else, "expected 'else' branch for if expression")?;
@@ -373,7 +445,7 @@ impl<'a> Parser<'a> {
         self.block("else body")
     }
 
-    fn elif_tail(&mut self, require_else: bool) -> FyrResult<Vec<Statement>> {
+    fn elif_tail(&mut self, require_else: bool, span: Span) -> FyrResult<Vec<Statement>> {
         let condition = self.or()?;
         self.consume(&TokenKind::Colon, "expected ':' after elif condition")?;
         let then_branch = self.block("elif body")?;
@@ -387,6 +459,8 @@ impl<'a> Parser<'a> {
             condition,
             then_branch,
             else_branch,
+            span,
+            source_path: None,
         }])
     }
 
@@ -793,11 +867,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_import_statement() {
+        let tokens = lex("import \"lib.fyr\"\n").expect("lexing should pass");
+        let program = parse(&tokens).expect("parsing should pass");
+
+        assert_eq!(
+            program.statements[0],
+            Statement::Import {
+                path: "lib.fyr".to_owned(),
+                span: Span::new(1, 1),
+                source_path: None,
+            }
+        );
+    }
+
+    #[test]
     fn preserves_operator_precedence() {
         let tokens = lex("1 + 2 * 3\n").expect("lexing should pass");
         let program = parse(&tokens).expect("parsing should pass");
 
-        let Statement::Expr(Expr::Binary { op, .. }) = &program.statements[0] else {
+        let Statement::Expr {
+            expr: Expr::Binary { op, .. },
+            ..
+        } = &program.statements[0]
+        else {
             panic!("expected binary expression");
         };
 
@@ -834,7 +927,13 @@ for value in [1, 2, 3]:
 
         assert!(matches!(
             program.statements[0],
-            Statement::For { ref body, .. } if matches!(body[0], Statement::Expr(Expr::Call { .. }))
+            Statement::For { ref body, .. } if matches!(
+                body[0],
+                Statement::Expr {
+                    expr: Expr::Call { .. },
+                    ..
+                }
+            )
         ));
     }
 
@@ -927,7 +1026,10 @@ p.x + p.y
         assert!(matches!(program.statements[0], Statement::Struct { .. }));
         assert!(matches!(
             program.statements[2],
-            Statement::Expr(Expr::Binary { .. })
+            Statement::Expr {
+                expr: Expr::Binary { .. },
+                ..
+            }
         ));
     }
 
@@ -993,6 +1095,7 @@ fn fib(n: i64) -> i64:
             params,
             return_type,
             body,
+            ..
         } = &program.statements[0]
         else {
             panic!("expected function statement");

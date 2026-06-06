@@ -23,6 +23,7 @@ pub enum TokenKind {
     Fn,
     For,
     In,
+    Import,
     If,
     Elif,
     Else,
@@ -375,6 +376,7 @@ impl Lexer {
             "fn" => TokenKind::Fn,
             "for" => TokenKind::For,
             "if" => TokenKind::If,
+            "import" => TokenKind::Import,
             "in" => TokenKind::In,
             "let" => TokenKind::Let,
             "not" => TokenKind::Bang,
@@ -452,6 +454,22 @@ mod tests {
         let kinds: Vec<TokenKind> = tokens.into_iter().map(|token| token.kind).collect();
 
         assert!(matches!(kinds[0], TokenKind::Elif));
+    }
+
+    #[test]
+    fn lexes_import_keyword() {
+        let tokens = lex("import \"lib.fyr\"\n").expect("lexing should pass");
+        let kinds: Vec<TokenKind> = tokens.into_iter().map(|token| token.kind).collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Import,
+                TokenKind::Str("lib.fyr".to_owned()),
+                TokenKind::Newline,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]

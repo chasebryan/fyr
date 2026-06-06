@@ -1,0 +1,3 @@
+# Manifest-based Fyr project entry point.
+import "lib.fyr"
+print(greeting("Fyr project"))
