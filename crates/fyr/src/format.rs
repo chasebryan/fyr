@@ -1,4 +1,6 @@
-use crate::ast::{BinaryOp, Expr, MatchPattern, Param, Program, Statement, TypeName, UnaryOp};
+use crate::ast::{
+    BinaryOp, Expr, IfLetPattern, MatchPattern, Param, Program, Statement, TypeName, UnaryOp,
+};
 use crate::diagnostic::FyrResult;
 use crate::lexer;
 use crate::parser;
@@ -149,13 +151,13 @@ impl Formatter {
                 self.if_statement(condition, then_branch, else_branch, indent, "if");
             }
             Statement::IfLet {
-                name,
+                pattern,
                 value,
                 then_branch,
                 else_branch,
                 ..
             } => {
-                self.if_let_statement(name, value, then_branch, else_branch, indent, "if");
+                self.if_let_statement(pattern, value, then_branch, else_branch, indent, "if");
             }
             Statement::Return { value, .. } => {
                 self.output.push_str("return");
@@ -188,7 +190,7 @@ impl Formatter {
 
     fn if_let_statement(
         &mut self,
-        name: &str,
+        pattern: &IfLetPattern,
         value: &Expr,
         then_branch: &[Statement],
         else_branch: &[Statement],
@@ -197,7 +199,7 @@ impl Formatter {
     ) {
         self.output.push_str(keyword);
         self.output.push_str(" let ");
-        self.output.push_str(name);
+        self.if_let_pattern(pattern);
         self.output.push_str(" = ");
         self.expr(value, 0, indent);
         self.output.push_str(":\n");
@@ -222,7 +224,7 @@ impl Formatter {
             }
             [
                 Statement::IfLet {
-                    name,
+                    pattern,
                     value,
                     then_branch,
                     else_branch,
@@ -231,7 +233,7 @@ impl Formatter {
             ] => {
                 self.output.push('\n');
                 self.write_indent(indent);
-                self.if_let_statement(name, value, then_branch, else_branch, indent, "elif");
+                self.if_let_statement(pattern, value, then_branch, else_branch, indent, "elif");
             }
             statements => {
                 self.output.push('\n');
@@ -276,13 +278,13 @@ impl Formatter {
                 self.if_tail(else_branch, indent);
             }
             Expr::IfLet {
-                name,
+                pattern,
                 value,
                 then_branch,
                 else_branch,
             } => {
                 self.output.push_str("if let ");
-                self.output.push_str(name);
+                self.if_let_pattern(pattern);
                 self.output.push_str(" = ");
                 self.expr(value, 0, indent);
                 self.output.push_str(":\n");
@@ -304,6 +306,26 @@ impl Formatter {
                 }
             }
             _ => self.expr_inline(expr, parent_precedence),
+        }
+    }
+
+    fn if_let_pattern(&mut self, pattern: &IfLetPattern) {
+        match pattern {
+            IfLetPattern::Binding { name } => self.output.push_str(name),
+            IfLetPattern::Variant {
+                enum_name,
+                variant,
+                binding,
+            } => {
+                self.output.push_str(enum_name);
+                self.output.push('.');
+                self.output.push_str(variant);
+                if let Some(binding) = binding {
+                    self.output.push('(');
+                    self.output.push_str(binding);
+                    self.output.push(')');
+                }
+            }
         }
     }
 
@@ -835,13 +857,17 @@ elif let fallback=other:
  print(fallback)
 else:
  print(0)
+if let Result.Ok(value)=result:
+ print(value)
+elif let Result.Err(message)=result:
+ print(len(message))
 "#,
         )
         .expect("formatting should pass");
 
         assert_eq!(
             formatted,
-            "let maybe: i64? = 42\nlet other: i64? = nil\nif let value = maybe:\n    print(value)\nelif let fallback = other:\n    print(fallback)\nelse:\n    print(0)\n"
+            "let maybe: i64? = 42\nlet other: i64? = nil\nif let value = maybe:\n    print(value)\nelif let fallback = other:\n    print(fallback)\nelse:\n    print(0)\nif let Result.Ok(value) = result:\n    print(value)\nelif let Result.Err(message) = result:\n    print(len(message))\n"
         );
     }
 

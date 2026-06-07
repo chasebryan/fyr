@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 
 use crate::ast::{
-    BinaryOp, EnumVariant, Expr, MatchArm, MatchPattern, Param, Program, Statement, TypeName,
-    UnaryOp,
+    BinaryOp, EnumVariant, Expr, IfLetPattern, MatchArm, MatchPattern, Param, Program, Statement,
+    TypeName, UnaryOp,
 };
 use crate::diagnostic::{FyrError, FyrResult};
 use crate::span::Span;
@@ -88,7 +88,7 @@ impl Checker {
     fn check_program(mut self, program: &Program) -> FyrResult<()> {
         self.predeclare_enums(&program.statements)?;
         self.predeclare_structs(&program.statements)?;
-        self.validate_enum_payloads()?;
+        self.validate_enum_payloads(&program.statements)?;
         self.predeclare_functions(&program.statements)?;
 
         for statement in &program.statements {
@@ -148,17 +148,23 @@ impl Checker {
         Ok(())
     }
 
-    fn validate_enum_payloads(&self) -> FyrResult<()> {
-        for (enum_name, variants) in &self.enums {
+    fn validate_enum_payloads(&self, statements: &[Statement]) -> FyrResult<()> {
+        for statement in statements {
+            let Statement::Enum { name, variants, .. } = statement else {
+                continue;
+            };
+            let source_path = statement.source_path();
             for variant in variants {
                 if let Some(payload) = &variant.payload {
                     if payload == &TypeName::Infer {
                         return Err(type_error(format!(
-                            "enum '{enum_name}' variant '{}' needs an explicit payload type",
+                            "enum '{name}' variant '{}' needs an explicit payload type",
                             variant.name
-                        )));
+                        ))
+                        .with_fallback_location(variant.span, source_path));
                     }
-                    self.validate_type_name(payload)?;
+                    self.validate_type_name(payload)
+                        .map_err(|error| error.with_fallback_location(variant.span, source_path))?;
                 }
             }
         }
@@ -252,12 +258,12 @@ impl Checker {
                 ..
             } => self.check_if_statement(condition, then_branch, else_branch),
             Statement::IfLet {
-                name,
+                pattern,
                 value,
                 then_branch,
                 else_branch,
                 ..
-            } => self.check_if_let_statement(name, value, then_branch, else_branch),
+            } => self.check_if_let_statement(pattern, value, then_branch, else_branch),
             Statement::Return { value, .. } => self.check_return(value.as_ref()),
             Statement::Break { .. } => {
                 if self.loop_depth == 0 {
@@ -416,11 +422,11 @@ impl Checker {
                 else_branch,
             } => self.check_if(condition, then_branch, else_branch, expected),
             Expr::IfLet {
-                name,
+                pattern,
                 value,
                 then_branch,
                 else_branch,
-            } => self.check_if_let(name, value, then_branch, else_branch, expected),
+            } => self.check_if_let(pattern, value, then_branch, else_branch, expected),
             Expr::Match { value, arms } => self.check_match(value, arms, expected),
         }
     }
@@ -624,7 +630,11 @@ impl Checker {
                     "enum variant '{enum_name}.{variant_name}' does not take a payload"
                 )));
             }
-            (None, None) => {}
+            (None, None) => {
+                return Err(type_error(format!(
+                    "enum variant '{enum_name}.{variant_name}' is a value and should not be called"
+                )));
+            }
         }
 
         Ok(Type::Struct(enum_name.to_owned()))
@@ -1316,8 +1326,28 @@ impl Checker {
             return Err(expected_type("bool", &condition_type));
         }
 
-        let then_type = self.check_block_scoped_with_hint(then_branch, expected)?;
-        let else_type = self.check_block_scoped_with_hint(else_branch, expected)?;
+        let (then_type, else_type) = if expected.is_none()
+            && block_ends_with_array_hint_hole(then_branch)
+            && !block_ends_with_array_hint_hole(else_branch)
+        {
+            let else_type = self.check_block_scoped(else_branch)?;
+            let then_type =
+                self.check_block_scoped_with_hint(then_branch, array_type_hint(&else_type))?;
+            (then_type, else_type)
+        } else if expected.is_none()
+            && block_ends_with_array_hint_hole(else_branch)
+            && !block_ends_with_array_hint_hole(then_branch)
+        {
+            let then_type = self.check_block_scoped(then_branch)?;
+            let else_type =
+                self.check_block_scoped_with_hint(else_branch, array_type_hint(&then_type))?;
+            (then_type, else_type)
+        } else {
+            (
+                self.check_block_scoped_with_hint(then_branch, expected)?,
+                self.check_block_scoped_with_hint(else_branch, expected)?,
+            )
+        };
 
         match merge_branch_types(then_type, else_type) {
             Some(ty) => Ok(ty),
@@ -1346,15 +1376,35 @@ impl Checker {
 
     fn check_if_let(
         &mut self,
-        name: &str,
+        pattern: &IfLetPattern,
         value: &Expr,
         then_branch: &[Statement],
         else_branch: &[Statement],
         expected: Option<&Type>,
     ) -> FyrResult<Type> {
-        let inner_type = self.check_if_let_value(value)?;
-        let then_type = self.check_if_let_then(name, inner_type, then_branch, expected)?;
-        let else_type = self.check_block_scoped_with_hint(else_branch, expected)?;
+        let binding = self.check_if_let_pattern(pattern, value)?;
+        let (then_type, else_type) = if expected.is_none()
+            && block_ends_with_array_hint_hole(then_branch)
+            && !block_ends_with_array_hint_hole(else_branch)
+        {
+            let else_type = self.check_block_scoped(else_branch)?;
+            let then_type =
+                self.check_if_let_then(binding, then_branch, array_type_hint(&else_type))?;
+            (then_type, else_type)
+        } else if expected.is_none()
+            && block_ends_with_array_hint_hole(else_branch)
+            && !block_ends_with_array_hint_hole(then_branch)
+        {
+            let then_type = self.check_if_let_then(binding, then_branch, None)?;
+            let else_type =
+                self.check_block_scoped_with_hint(else_branch, array_type_hint(&then_type))?;
+            (then_type, else_type)
+        } else {
+            (
+                self.check_if_let_then(binding, then_branch, expected)?,
+                self.check_block_scoped_with_hint(else_branch, expected)?,
+            )
+        };
 
         match merge_branch_types(then_type, else_type) {
             Some(ty) => Ok(ty),
@@ -1364,20 +1414,20 @@ impl Checker {
 
     fn check_if_let_statement(
         &mut self,
-        name: &str,
+        pattern: &IfLetPattern,
         value: &Expr,
         then_branch: &[Statement],
         else_branch: &[Statement],
     ) -> FyrResult<Type> {
-        let inner_type = self.check_if_let_value(value)?;
+        let binding = self.check_if_let_pattern(pattern, value)?;
 
         if !if_chain_has_final_else(else_branch) {
-            self.check_if_let_then(name, inner_type, then_branch, None)?;
+            self.check_if_let_then(binding, then_branch, None)?;
             self.check_block_scoped(else_branch)?;
             return Ok(Type::Unit);
         }
 
-        let then_type = self.check_if_let_then(name, inner_type, then_branch, None)?;
+        let then_type = self.check_if_let_then(binding, then_branch, None)?;
         let else_type = self.check_block_scoped(else_branch)?;
 
         match merge_branch_types(then_type, else_type) {
@@ -1386,24 +1436,70 @@ impl Checker {
         }
     }
 
-    fn check_if_let_value(&mut self, value: &Expr) -> FyrResult<Type> {
-        match self.check_expr(value)? {
-            Type::Nullable(inner) => Ok(*inner),
-            found => Err(type_error(format!(
-                "if let expected nullable, found {found}"
-            ))),
+    fn check_if_let_pattern<'a>(
+        &mut self,
+        pattern: &'a IfLetPattern,
+        value: &Expr,
+    ) -> FyrResult<Option<(&'a str, Type)>> {
+        match pattern {
+            IfLetPattern::Binding { name } => match self.check_expr(value)? {
+                Type::Nullable(inner) => Ok(Some((name.as_str(), *inner))),
+                found => Err(type_error(format!(
+                    "if let expected nullable, found {found}"
+                ))),
+            },
+            IfLetPattern::Variant {
+                enum_name,
+                variant,
+                binding,
+            } => {
+                let value_type = self.check_expr(value)?;
+                let Type::Struct(value_enum) = value_type else {
+                    return Err(type_error(format!(
+                        "if let expected enum value, found {value_type}"
+                    )));
+                };
+                if value_enum != *enum_name {
+                    return Err(type_error(format!(
+                        "if let pattern expected {value_enum}, found {enum_name}.{variant}"
+                    )));
+                }
+
+                let variants = self.enums.get(enum_name).ok_or_else(|| {
+                    type_error(format!("if let expected enum, found {enum_name}"))
+                })?;
+                let Some(declared_variant) =
+                    variants.iter().find(|declared| declared.name == *variant)
+                else {
+                    return Err(type_error(format!(
+                        "enum '{enum_name}' has no variant '{variant}'"
+                    )));
+                };
+
+                if let Some(binding) = binding {
+                    let Some(payload) = &declared_variant.payload else {
+                        return Err(type_error(format!(
+                            "if let binding for {enum_name}.{variant} needs a payload variant"
+                        )));
+                    };
+                    Ok(Some((binding.as_str(), payload.as_type())))
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 
     fn check_if_let_then(
         &mut self,
-        name: &str,
-        binding_type: Type,
+        binding: Option<(&str, Type)>,
         then_branch: &[Statement],
         expected: Option<&Type>,
     ) -> FyrResult<Type> {
         self.push_scope();
-        self.define(name, binding_type, false)?;
+        if let Some((name, binding_type)) = binding {
+            self.define(name, binding_type, false)?;
+        }
         let result = self.check_block_with_hint(then_branch, expected);
         self.pop_scope();
         result
@@ -1426,7 +1522,7 @@ impl Checker {
 
         let mut seen = HashSet::new();
         let mut saw_else = false;
-        let mut result_type: Option<Type> = None;
+        let mut checked_arms = Vec::with_capacity(arms.len());
 
         for arm in arms {
             if saw_else {
@@ -1475,22 +1571,10 @@ impl Checker {
                 }
             }
 
-            let arm_type = if let Some((binding, ty)) = payload_binding {
-                self.push_scope();
-                let result = self
-                    .define(binding, ty, false)
-                    .and_then(|_| self.check_block_with_hint(&arm.body, expected));
-                self.pop_scope();
-                result?
-            } else {
-                self.check_block_scoped_with_hint(&arm.body, expected)?
-            };
-            result_type = Some(match result_type {
-                Some(current) => merge_branch_types(current, arm_type).ok_or_else(|| {
-                    type_error("match arms must have the same type").with_fallback_span(arm.span)
-                })?,
-                None => arm_type,
-            });
+            checked_arms.push((
+                arm,
+                payload_binding.map(|(binding, ty)| (binding.to_owned(), ty)),
+            ));
         }
 
         if !saw_else {
@@ -1504,7 +1588,62 @@ impl Checker {
             }
         }
 
+        let inferred_array_hint = if expected.is_none() {
+            self.infer_match_array_hint(&checked_arms)?
+        } else {
+            None
+        };
+        let body_expected = expected.or(inferred_array_hint.as_ref());
+        let mut result_type: Option<Type> = None;
+
+        for (arm, payload_binding) in &checked_arms {
+            let arm_type =
+                self.check_match_arm_body(arm, payload_binding.as_ref(), body_expected)?;
+            result_type = Some(match result_type {
+                Some(current) => merge_branch_types(current, arm_type).ok_or_else(|| {
+                    type_error("match arms must have the same type").with_fallback_span(arm.span)
+                })?,
+                None => arm_type,
+            });
+        }
+
         result_type.ok_or_else(|| type_error("match needs at least one arm"))
+    }
+
+    fn infer_match_array_hint(
+        &mut self,
+        arms: &[(&MatchArm, Option<(String, Type)>)],
+    ) -> FyrResult<Option<Type>> {
+        for (arm, payload_binding) in arms {
+            if block_ends_with_array_hint_hole(&arm.body) {
+                continue;
+            }
+
+            let arm_type = self.check_match_arm_body(arm, payload_binding.as_ref(), None)?;
+            if matches!(arm_type, Type::Array(_)) {
+                return Ok(Some(arm_type));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn check_match_arm_body(
+        &mut self,
+        arm: &MatchArm,
+        payload_binding: Option<&(String, Type)>,
+        expected: Option<&Type>,
+    ) -> FyrResult<Type> {
+        if let Some((binding, ty)) = payload_binding {
+            self.push_scope();
+            let result = self
+                .define(binding, ty.clone(), false)
+                .and_then(|_| self.check_block_with_hint(&arm.body, expected));
+            self.pop_scope();
+            result
+        } else {
+            self.check_block_scoped_with_hint(&arm.body, expected)
+        }
     }
 
     fn check_return(&mut self, value: Option<&Expr>) -> FyrResult<Type> {
@@ -1728,7 +1867,8 @@ fn reject_duplicate_variants(
             return Err(type_error(format!(
                 "{owner_kind} '{owner_name}' has duplicate {member_kind} '{}'",
                 member.name
-            )));
+            ))
+            .with_fallback_span(member.span));
         }
     }
 
@@ -1815,6 +1955,27 @@ fn is_nullable_base_type(ty: &Type) -> bool {
 
 fn is_empty_array_literal(expr: &Expr) -> bool {
     matches!(expr, Expr::Array(elements) if elements.is_empty())
+}
+
+fn expr_needs_array_hint(expr: &Expr) -> bool {
+    match expr {
+        Expr::Array(elements) => elements.is_empty(),
+        Expr::Call { callee, args } if callee == "reverse" && args.len() == 1 => {
+            is_empty_array_literal(&args[0])
+        }
+        _ => false,
+    }
+}
+
+fn block_ends_with_array_hint_hole(statements: &[Statement]) -> bool {
+    matches!(
+        statements.last(),
+        Some(Statement::Expr { expr, .. }) if expr_needs_array_hint(expr)
+    )
+}
+
+fn array_type_hint(ty: &Type) -> Option<&Type> {
+    matches!(ty, Type::Array(_)).then_some(ty)
 }
 
 fn expected_type(expected: &str, found: &Type) -> FyrError {
@@ -2310,8 +2471,18 @@ fn unwrap_or_zero(result: Result) -> i64:
 
 let ok: Result = Result.Ok(42)
 let err: Result = Result.Err("failed")
+let recovered = if let Result.Ok(value) = ok:
+    value
+else:
+    0
+let missed = if let Result.Err(message) = ok:
+    len(message)
+else:
+    0
 assert(unwrap_or_zero(ok) == 42)
 assert(unwrap_or_zero(err) == 6)
+assert(recovered == 42)
+assert(missed == 0)
 "#,
         )
         .expect("payload enum program should typecheck");
@@ -2424,6 +2595,24 @@ enum Status:
                 .message
                 .contains("enum 'Status' has duplicate variant 'Ready'")
         );
+        assert_eq!((duplicate.line, duplicate.column), (4, 5));
+
+        let unknown_payload_type = typecheck(
+            r#"
+enum Result:
+    Ok(Missing)
+"#,
+        )
+        .expect_err("unknown enum payload type should fail");
+        assert!(
+            unknown_payload_type
+                .message
+                .contains("unknown type 'Missing'")
+        );
+        assert_eq!(
+            (unknown_payload_type.line, unknown_payload_type.column),
+            (3, 5)
+        );
 
         let unknown_variant = typecheck(
             r#"
@@ -2503,6 +2692,21 @@ let status = Status.Ready(1)
                 .contains("enum variant 'Status.Ready' does not take a payload")
         );
 
+        let unit_call = typecheck(
+            r#"
+enum Status:
+    Ready
+
+let status = Status.Ready()
+"#,
+        )
+        .expect_err("unit variant call should fail");
+        assert!(
+            unit_call
+                .message
+                .contains("enum variant 'Status.Ready' is a value and should not be called")
+        );
+
         let unit_binding = typecheck(
             r#"
 enum Status:
@@ -2518,6 +2722,23 @@ let label = match Status.Ready:
             unit_binding
                 .message
                 .contains("match arm binding for Status.Ready needs a payload variant")
+        );
+
+        let unit_if_let_binding = typecheck(
+            r#"
+enum Status:
+    Pending
+    Ready
+
+if let Status.Ready(value) = Status.Pending:
+    print(value)
+"#,
+        )
+        .expect_err("unit variant if let binding should fail");
+        assert!(
+            unit_if_let_binding
+                .message
+                .contains("if let binding for Status.Ready needs a payload variant")
         );
     }
 
@@ -2837,9 +3058,27 @@ elif let fallback = maybe(true):
     assert(fallback == 42)
 else:
     assert(recovered == 43)
+
+enum Result:
+    Ok(i64)
+    Err(str)
+
+let ok = Result.Ok(41)
+let unwrapped = if let Result.Ok(value) = ok:
+    value + 1
+else:
+    0
+assert(unwrapped == 42)
+
+if let Result.Err(message) = ok:
+    assert(message == "no")
+elif let Result.Ok(value) = ok:
+    assert(value == 41)
+else:
+    assert(false)
 "#,
         )
-        .expect("if let should narrow nullable values");
+        .expect("if let should narrow nullable values and enum variants");
     }
 
     #[test]
@@ -2873,6 +3112,70 @@ else:
             mismatched
                 .message
                 .contains("if let branches must have the same type")
+        );
+
+        let non_enum = typecheck(
+            r#"
+enum Result:
+    Ok(i64)
+
+if let Result.Ok(value) = 42:
+    print(value)
+"#,
+        )
+        .expect_err("if let enum pattern on non-enum value should fail");
+        assert!(non_enum.message.contains("if let expected enum value"));
+
+        let wrong_enum = typecheck(
+            r#"
+enum Result:
+    Ok(i64)
+
+enum Status:
+    Ready
+
+if let Status.Ready = Result.Ok(1):
+    print("ready")
+"#,
+        )
+        .expect_err("if let wrong enum pattern should fail");
+        assert!(
+            wrong_enum
+                .message
+                .contains("if let pattern expected Result, found Status.Ready")
+        );
+
+        let unknown_variant = typecheck(
+            r#"
+enum Result:
+    Ok(i64)
+
+let result = Result.Ok(1)
+if let Result.Err(message) = result:
+    print(message)
+"#,
+        )
+        .expect_err("if let unknown variant should fail");
+        assert!(
+            unknown_variant
+                .message
+                .contains("enum 'Result' has no variant 'Err'")
+        );
+
+        let unit_binding = typecheck(
+            r#"
+enum Status:
+    Ready
+
+if let Status.Ready(value) = Status.Ready:
+    print(value)
+"#,
+        )
+        .expect_err("if let binding on unit variant should fail");
+        assert!(
+            unit_binding
+                .message
+                .contains("if let binding for Status.Ready needs a payload variant")
         );
     }
 
@@ -3615,6 +3918,46 @@ assert(is_empty(from_match))
 "#,
         )
         .expect("expected branch result types should type empty arrays");
+    }
+
+    #[test]
+    fn infers_empty_array_branch_types_from_sibling_branches() {
+        typecheck(
+            r#"
+enum Source:
+    Empty
+    Full
+
+let flag = true
+let from_if = if flag:
+    []
+else:
+    [1, 2]
+
+let from_reverse = if flag:
+    reverse([])
+else:
+    [8, 13]
+
+let maybe: i64? = nil
+let from_if_let = if let value = maybe:
+    [value]
+else:
+    []
+
+let from_match = match Source.Empty:
+    Source.Empty:
+        []
+    Source.Full:
+        [3, 5]
+
+assert(is_empty(from_if))
+assert(is_empty(from_reverse))
+assert(is_empty(from_if_let))
+assert(is_empty(from_match))
+"#,
+        )
+        .expect("sibling branch array types should type empty array branches");
     }
 
     #[test]

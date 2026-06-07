@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use crate::ast::{
-    BinaryOp, EnumVariant, Expr, MatchArm, MatchPattern, Param, Program, Statement, TypeName,
-    UnaryOp,
+    BinaryOp, EnumVariant, Expr, IfLetPattern, MatchArm, MatchPattern, Param, Program, Statement,
+    TypeName, UnaryOp,
 };
 use crate::diagnostic::{FyrError, FyrResult};
 use crate::span::Span;
@@ -102,6 +102,14 @@ enum Flow {
     Return(Value),
     Break,
     Continue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum IfLetMatch {
+    NoMatch,
+    Match {
+        binding: Option<(String, Value, TypeName)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -257,12 +265,12 @@ impl Evaluator {
                 ..
             } => self.eval_if(condition, then_branch, else_branch),
             Statement::IfLet {
-                name,
+                pattern,
                 value,
                 then_branch,
                 else_branch,
                 ..
-            } => self.eval_if_let(name, value, then_branch, else_branch),
+            } => self.eval_if_let(pattern, value, then_branch, else_branch),
             Statement::Return { value, .. } => {
                 let value = match value {
                     Some(value) => self.eval_value(value)?,
@@ -430,11 +438,11 @@ impl Evaluator {
                 else_branch,
             } => self.eval_if(condition, then_branch, else_branch),
             Expr::IfLet {
-                name,
+                pattern,
                 value,
                 then_branch,
                 else_branch,
-            } => self.eval_if_let(name, value, then_branch, else_branch),
+            } => self.eval_if_let(pattern, value, then_branch, else_branch),
             Expr::Match { value, arms } => self.eval_match(value, arms),
         }
     }
@@ -660,7 +668,11 @@ impl Evaluator {
                     "enum variant '{enum_name}.{variant_name}' does not take a payload"
                 )));
             }
-            (None, None) => None,
+            (None, None) => {
+                return Err(runtime_error(format!(
+                    "enum variant '{enum_name}.{variant_name}' is a value and should not be called"
+                )));
+            }
         };
 
         Ok(Flow::Value(Value::Enum {
@@ -1526,7 +1538,7 @@ impl Evaluator {
 
     fn eval_if_let(
         &mut self,
-        name: &str,
+        pattern: &IfLetPattern,
         value: &Expr,
         then_branch: &[Statement],
         else_branch: &[Statement],
@@ -1536,16 +1548,90 @@ impl Evaluator {
             flow => return Ok(flow),
         };
 
-        if value == Value::Nil {
-            return self.eval_block_scoped(else_branch);
-        }
+        let binding = match self.eval_if_let_pattern(pattern, value)? {
+            IfLetMatch::Match { binding } => binding,
+            IfLetMatch::NoMatch => return self.eval_block_scoped(else_branch),
+        };
 
         self.push_scope();
-        let ty = infer_value_type(&value);
-        self.define(name, value, ty, false)?;
+        if let Some((name, value, ty)) = binding {
+            self.define(&name, value, ty, false)?;
+        }
         let result = self.eval_block(then_branch);
         self.pop_scope();
         result
+    }
+
+    fn eval_if_let_pattern(&self, pattern: &IfLetPattern, value: Value) -> FyrResult<IfLetMatch> {
+        match pattern {
+            IfLetPattern::Binding { name } => {
+                if value == Value::Nil {
+                    return Ok(IfLetMatch::NoMatch);
+                }
+                let ty = infer_value_type(&value);
+                Ok(IfLetMatch::Match {
+                    binding: Some((name.clone(), value, ty)),
+                })
+            }
+            IfLetPattern::Variant {
+                enum_name,
+                variant,
+                binding,
+            } => {
+                let Value::Enum {
+                    name,
+                    variant: value_variant,
+                    payload,
+                } = value
+                else {
+                    return Err(runtime_error(format!(
+                        "if let expected enum value, found {}",
+                        value.type_name()
+                    )));
+                };
+
+                if name != *enum_name {
+                    return Err(runtime_error(format!(
+                        "if let pattern expected {name}, found {enum_name}.{variant}"
+                    )));
+                }
+
+                let variants = self.enums.get(enum_name).ok_or_else(|| {
+                    runtime_error(format!("if let expected enum, found {enum_name}"))
+                })?;
+                let Some(declared_variant) =
+                    variants.iter().find(|declared| declared.name == *variant)
+                else {
+                    return Err(runtime_error(format!(
+                        "enum '{enum_name}' has no variant '{variant}'"
+                    )));
+                };
+
+                if let Some(binding) = binding {
+                    let Some(payload_type) = &declared_variant.payload else {
+                        return Err(runtime_error(format!(
+                            "if let binding for {enum_name}.{variant} needs a payload variant"
+                        )));
+                    };
+                    if value_variant != *variant {
+                        return Ok(IfLetMatch::NoMatch);
+                    }
+                    let Some(payload) = payload.map(|payload| *payload) else {
+                        return Err(runtime_error(format!(
+                            "if let binding for {enum_name}.{variant} expected a payload value"
+                        )));
+                    };
+                    Ok(IfLetMatch::Match {
+                        binding: Some((binding.clone(), payload, payload_type.clone())),
+                    })
+                } else {
+                    if value_variant != *variant {
+                        return Ok(IfLetMatch::NoMatch);
+                    }
+                    Ok(IfLetMatch::Match { binding: None })
+                }
+            }
+        }
     }
 
     fn eval_match(&mut self, value: &Expr, arms: &[MatchArm]) -> FyrResult<Flow> {
@@ -2365,11 +2451,78 @@ else:
     seen = -1
 
 assert(recovered == 42)
-seen
-"#)
-        .expect("if let should unwrap present nullable values and skip nil values");
 
-        assert_eq!(result.last_value, Value::Int(41));
+enum Result:
+    Ok(i64)
+    Err(str)
+
+let ok = Result.Ok(41)
+let enum_recovered = if let Result.Ok(value) = ok:
+    value + 1
+else:
+    0
+
+if let Result.Err(message) = ok:
+    seen = len(message)
+elif let Result.Ok(value) = ok:
+    seen = value
+else:
+    seen = -1
+
+assert(enum_recovered == 42)
+seen + enum_recovered
+"#)
+        .expect("if let should unwrap nullable values and enum variants");
+
+        assert_eq!(result.last_value, Value::Int(83));
+    }
+
+    #[test]
+    fn rejects_runtime_if_let_enum_pattern_errors() {
+        let non_enum = run(r#"
+enum Result:
+    Ok(i64)
+
+if let Result.Ok(value) = 42:
+    print(value)
+"#)
+        .expect_err("if let enum pattern on non-enum runtime value should fail");
+        assert!(
+            non_enum
+                .message
+                .contains("if let expected enum value, found i64")
+        );
+
+        let wrong_enum = run(r#"
+enum Result:
+    Ok(i64)
+
+enum Status:
+    Ready
+
+if let Status.Ready = Result.Ok(1):
+    print("ready")
+"#)
+        .expect_err("if let wrong enum runtime pattern should fail");
+        assert!(
+            wrong_enum
+                .message
+                .contains("if let pattern expected Result, found Status.Ready")
+        );
+
+        let unit_binding = run(r#"
+enum Status:
+    Ready
+
+if let Status.Ready(value) = Status.Ready:
+    print(value)
+"#)
+        .expect_err("if let binding on unit runtime variant should fail");
+        assert!(
+            unit_binding
+                .message
+                .contains("if let binding for Status.Ready needs a payload variant")
+        );
     }
 
     #[test]
@@ -2913,10 +3066,21 @@ fn unwrap_or_len(result: Result) -> i64:
 
 let ok = Result.Ok(41)
 let err = Result.Err("oops")
+let recovered = if let Result.Ok(value) = ok:
+    value + 1
+else:
+    0
+let missed = if let Result.Err(message) = ok:
+    len(message)
+else:
+    0
 assert(ok == Result.Ok(41))
 assert(ok != Result.Ok(42))
+assert(type(ok) == "Result")
 assert(unwrap_or_len(ok) == 42)
 assert(unwrap_or_len(err) == 4)
+assert(recovered == 42)
+assert(missed == 0)
 print(ok)
 ok
 "#)
@@ -3016,6 +3180,34 @@ Result.Ok
             missing_payload
                 .message
                 .contains("enum variant 'Result.Ok' needs a payload")
+        );
+
+        let unit_call = run(r#"
+enum Status:
+    Ready
+
+Status.Ready()
+"#)
+        .expect_err("unit runtime enum call should fail");
+        assert!(
+            unit_call
+                .message
+                .contains("enum variant 'Status.Ready' is a value and should not be called")
+        );
+
+        let unit_if_let_binding = run(r#"
+enum Status:
+    Pending
+    Ready
+
+if let Status.Ready(value) = Status.Pending:
+    print(value)
+"#)
+        .expect_err("unit runtime if let binding should fail");
+        assert!(
+            unit_if_let_binding
+                .message
+                .contains("if let binding for Status.Ready needs a payload variant")
         );
     }
 
@@ -3727,6 +3919,43 @@ let from_match: [i64] = match Source.Empty:
 len(from_if) + len(from_if_let) + len(from_match)
 "#)
         .expect("branch empty arrays should use annotated result types");
+
+        assert_eq!(result.last_value, Value::Int(0));
+    }
+
+    #[test]
+    fn runs_empty_array_branches_with_sibling_type_inference() {
+        let result = run(r#"
+enum Source:
+    Empty
+    Full
+
+let flag = true
+let from_if = if flag:
+    []
+else:
+    [1, 2]
+
+let from_reverse = if flag:
+    reverse([])
+else:
+    [8, 13]
+
+let maybe: i64? = nil
+let from_if_let = if let value = maybe:
+    [value]
+else:
+    []
+
+let from_match = match Source.Empty:
+    Source.Empty:
+        []
+    Source.Full:
+        [3, 5]
+
+len(from_if) + len(from_reverse) + len(from_if_let) + len(from_match)
+"#)
+        .expect("empty branches should infer array type from sibling branches");
 
         assert_eq!(result.last_value, Value::Int(0));
     }

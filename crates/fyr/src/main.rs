@@ -1122,6 +1122,32 @@ answer()
     }
 
     #[test]
+    fn imported_enum_payload_errors_include_variant_source_line() {
+        let root = temp_project_dir("import_enum_payload_error_path");
+        fs::create_dir_all(root.join("src")).expect("source dir should create");
+        let lib = root.join("src/lib.fyr");
+        let main = root.join("src/main.fyr");
+        fs::write(
+            &lib,
+            r#"enum Result:
+    Ok(Missing)
+"#,
+        )
+        .expect("lib should write");
+        fs::write(&main, "import \"lib.fyr\"\n").expect("main should write");
+        let args = vec![main.display().to_string()];
+
+        let error = check_files(&args).expect_err("imported enum payload type should fail");
+
+        assert!(error.contains(&lib.display().to_string()));
+        assert!(error.contains(":2:5:"));
+        assert!(error.contains("unknown type 'Missing'"));
+        assert!(error.contains("2 |     Ok(Missing)"));
+        assert!(error.contains("  |     ^"));
+        fs::remove_dir_all(root).expect("test project should clean up");
+    }
+
+    #[test]
     fn imported_match_arm_errors_include_imported_file_path() {
         let root = temp_project_dir("import_match_arm_error_path");
         fs::create_dir_all(root.join("src")).expect("source dir should create");

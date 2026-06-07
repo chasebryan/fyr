@@ -75,7 +75,7 @@ pub enum Statement {
         source_path: Option<PathBuf>,
     },
     IfLet {
-        name: String,
+        pattern: IfLetPattern,
         value: Expr,
         then_branch: Vec<Statement>,
         else_branch: Vec<Statement>,
@@ -272,6 +272,19 @@ pub struct Param {
 pub struct EnumVariant {
     pub name: String,
     pub payload: Option<TypeName>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IfLetPattern {
+    Binding {
+        name: String,
+    },
+    Variant {
+        enum_name: String,
+        variant: String,
+        binding: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -349,7 +362,7 @@ pub enum Expr {
         else_branch: Vec<Statement>,
     },
     IfLet {
-        name: String,
+        pattern: IfLetPattern,
         value: Box<Expr>,
         then_branch: Vec<Statement>,
         else_branch: Vec<Statement>,

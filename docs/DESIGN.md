@@ -31,7 +31,7 @@ fn fib(n: i64) -> i64:
         fib(n - 1) + fib(n - 2)
 ```
 
-The bootstrap implementation now supports typed function signatures, local function declarations after the declaration point, optional binding annotations, nominal structs with field access, unit and payload enums for closed state/data sets, exhaustive enum `match` expressions with payload bindings, value equality for data, explicit `nil` with nullable `T?` types, scoped `if let` nullable unwrapping, homogeneous arrays with checked append, reverse, first/last reads, indexing, fallback reads, search/count helpers, slicing, and emptiness checks, checked integer arithmetic, finite `f64` arithmetic, concatenation, containment checks, and iteration, string containment, checked indexing, character iteration, split/join, trim/case helpers, prefix/suffix checks, replacement, reverse, first/last reads, fallback reads, search/count helpers, slicing, and emptiness checks, readable boolean operators, relative file imports, end-exclusive `range` loops, explicit mutable `var` bindings, static checks for calls and primitive operations, declaration hygiene for same-scope bindings, function parameters, struct fields, and enum variants, Python-style indented blocks, statement-style `if` / `elif` / `else` blocks, expression-style `if` / `elif` / `else` / `match` branches, `while` loops, explicit `return` / `break` / `continue` exits, a persistent REPL with load/history/reset commands, project scaffolding with `fyr.toml`, checked import-flattened bootstrap build artifacts, and comment-preserving `fyr fmt` formatting checks/writes. Fuller inference, ownership, and native code generation remain upcoming compiler layers.
+The bootstrap implementation now supports typed function signatures, local function declarations after the declaration point, optional binding annotations, nominal structs with field access, unit and payload enums for closed state/data sets, exhaustive enum `match` expressions with payload bindings, enum-pattern `if let` branches, value equality for data, explicit `nil` with nullable `T?` types, scoped `if let` nullable unwrapping, homogeneous arrays with checked append, reverse, first/last reads, indexing, fallback reads, search/count helpers, slicing, and emptiness checks, checked integer arithmetic, finite `f64` arithmetic, concatenation, containment checks, and iteration, string containment, checked indexing, character iteration, split/join, trim/case helpers, prefix/suffix checks, replacement, reverse, first/last reads, fallback reads, search/count helpers, slicing, and emptiness checks, readable boolean operators, relative file imports, end-exclusive `range` loops, explicit mutable `var` bindings, static checks for calls and primitive operations, declaration hygiene for same-scope bindings, function parameters, struct fields, and enum variants, Python-style indented blocks, statement-style `if` / `elif` / `else` blocks, expression-style `if` / `elif` / `else` / `match` branches, `while` loops, explicit `return` / `break` / `continue` exits, a persistent REPL with load/history/reset commands, project scaffolding with `fyr.toml`, checked import-flattened bootstrap build artifacts, and comment-preserving `fyr fmt` formatting checks/writes. Fuller inference, ownership, and native code generation remain upcoming compiler layers.
 
 Closed state and result-like data sets use unit and payload enums:
 
@@ -53,6 +53,13 @@ let label = match status:
 ```
 
 Variants are nominal values and can be compared, stored in homogeneous arrays, and handled with exhaustive `match` expressions. Payload variants use `Enum.Variant(value)` constructors, carry one typed value, and can bind that value inside a matching arm.
+
+Single-variant branches can use the same pattern shape:
+
+```fyr
+if let Status.Failed(message) = status:
+    print(message)
+```
 
 Numeric types are explicit:
 

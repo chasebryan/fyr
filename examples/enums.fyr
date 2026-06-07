@@ -23,6 +23,10 @@ let status: Status = Status.Ready
 let history: [Status] = [Status.Pending, status, Status.Failed]
 let ok: Result = Result.Ok(42)
 let err: Result = Result.Err("failed")
+let recovered = if let Result.Ok(value) = ok:
+    value
+else:
+    0
 assert(status == Status.Ready, "enum variants should compare by name and variant")
 assert(status != Status.Pending, "different enum variants should not be equal")
 assert(contains(history, Status.Failed), "enum variants should work in arrays")
@@ -31,6 +35,8 @@ assert(ok == Result.Ok(42), "payload variants should compare by payload")
 assert(ok != Result.Ok(7), "different payloads should not compare equal")
 assert(unwrap_or_len(ok) == 42, "match should bind payload values")
 assert(unwrap_or_len(err) == 6, "match should bind string payload values")
+assert(recovered == 42, "if let should bind matching payload variants")
+assert(type(ok) == "Result", "type should report nominal payload enum names")
 assert(type(status) == "Status", "type should report nominal enum names")
 assert(type(history) == "[Status]", "type should report nominal enum arrays")
 print(describe(status))

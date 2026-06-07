@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOp, EnumVariant, Expr, MatchArm, MatchPattern, Param, Program, Statement, TypeName,
-    UnaryOp,
+    BinaryOp, EnumVariant, Expr, IfLetPattern, MatchArm, MatchPattern, Param, Program, Statement,
+    TypeName, UnaryOp,
 };
 use crate::diagnostic::{FyrError, FyrResult};
 use crate::lexer::{Token, TokenKind};
@@ -309,13 +309,12 @@ impl<'a> Parser<'a> {
 
         let mut variants = Vec::new();
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            let name = match &self.advance().kind {
+            let token = self.advance();
+            let span = token.span;
+            let name = match &token.kind {
                 TokenKind::Identifier(name) => name.clone(),
                 _ => {
-                    return Err(FyrError::new(
-                        "expected a variant name in enum",
-                        self.previous().span,
-                    ));
+                    return Err(FyrError::new("expected a variant name in enum", span));
                 }
             };
 
@@ -330,7 +329,11 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            variants.push(EnumVariant { name, payload });
+            variants.push(EnumVariant {
+                name,
+                payload,
+                span,
+            });
             self.consume_statement_separator()?;
         }
 
@@ -385,12 +388,12 @@ impl<'a> Parser<'a> {
 
     fn if_statement(&mut self, span: Span) -> FyrResult<Statement> {
         if self.match_kind(&TokenKind::Let) {
-            let (name, value) = self.if_let_header()?;
+            let (pattern, value) = self.if_let_header()?;
             let then_branch = self.block("if let body")?;
             let else_branch = self.if_statement_tail()?;
 
             return Ok(Statement::IfLet {
-                name,
+                pattern,
                 value,
                 then_branch,
                 else_branch,
@@ -512,12 +515,12 @@ impl<'a> Parser<'a> {
 
     fn if_expression(&mut self) -> FyrResult<Expr> {
         if self.match_kind(&TokenKind::Let) {
-            let (name, value) = self.if_let_header()?;
+            let (pattern, value) = self.if_let_header()?;
             let then_branch = self.block("if let body")?;
             let else_branch = self.if_expression_tail()?;
 
             return Ok(Expr::IfLet {
-                name,
+                pattern,
                 value: Box::new(value),
                 then_branch,
                 else_branch,
@@ -565,7 +568,7 @@ impl<'a> Parser<'a> {
 
     fn elif_tail(&mut self, require_else: bool, span: Span) -> FyrResult<Vec<Statement>> {
         if self.match_kind(&TokenKind::Let) {
-            let (name, value) = self.if_let_header()?;
+            let (pattern, value) = self.if_let_header()?;
             let then_branch = self.block("elif let body")?;
             let else_branch = if require_else {
                 self.if_expression_tail()?
@@ -574,7 +577,7 @@ impl<'a> Parser<'a> {
             };
 
             return Ok(vec![Statement::IfLet {
-                name,
+                pattern,
                 value,
                 then_branch,
                 else_branch,
@@ -703,22 +706,60 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn if_let_header(&mut self) -> FyrResult<(String, Expr)> {
+    fn if_let_header(&mut self) -> FyrResult<(IfLetPattern, Expr)> {
         let token = self.advance();
-        let name = match &token.kind {
+        let first_name = match &token.kind {
             TokenKind::Identifier(name) => name.clone(),
             _ => {
                 return Err(FyrError::new(
-                    "expected a binding name after let",
+                    "expected a binding name or enum variant after let",
                     token.span,
                 ));
             }
         };
 
+        let pattern = if self.match_kind(&TokenKind::Dot) {
+            let variant = match &self.advance().kind {
+                TokenKind::Identifier(name) => name.clone(),
+                _ => {
+                    return Err(FyrError::new(
+                        "expected a variant name in if let pattern",
+                        self.previous().span,
+                    ));
+                }
+            };
+            let binding = if self.match_kind(&TokenKind::LParen) {
+                let token = self.advance();
+                let binding = match &token.kind {
+                    TokenKind::Identifier(name) => name.clone(),
+                    _ => {
+                        return Err(FyrError::new(
+                            "expected a payload binding name in if let pattern",
+                            token.span,
+                        ));
+                    }
+                };
+                self.consume(
+                    &TokenKind::RParen,
+                    "expected ')' after if let payload binding",
+                )?;
+                Some(binding)
+            } else {
+                None
+            };
+            IfLetPattern::Variant {
+                enum_name: first_name,
+                variant,
+                binding,
+            }
+        } else {
+            IfLetPattern::Binding { name: first_name }
+        };
+
         self.consume(&TokenKind::Equal, "expected '=' after if let binding")?;
         let value = self.coalesce()?;
         self.consume(&TokenKind::Colon, "expected ':' after if let value")?;
-        Ok((name, value))
+        Ok((pattern, value))
     }
 
     fn coalesce(&mut self) -> FyrResult<Expr> {
@@ -1396,10 +1437,12 @@ let status: Status = Status.Ready
                         EnumVariant {
                             name: "Pending".to_owned(),
                             payload: None,
+                            span: Span::new(3, 5),
                         },
                         EnumVariant {
                             name: "Ready".to_owned(),
                             payload: None,
+                            span: Span::new(4, 5),
                         },
                     ]
         ));
@@ -1539,6 +1582,10 @@ let recovered = if let value = maybe:
     value
 else:
     0
+
+let result = Result.Ok(42)
+if let Result.Ok(inner) = result:
+    print(inner)
 "#)
         .expect("lexing should pass");
         let program = parse(&tokens).expect("parsing should pass");
@@ -1546,7 +1593,7 @@ else:
         assert!(matches!(
             program.statements[1],
             Statement::IfLet {
-                ref name,
+                pattern: IfLetPattern::Binding { ref name },
                 value: Expr::Variable(_),
                 ..
             } if name == "value"
@@ -1554,9 +1601,24 @@ else:
         assert!(matches!(
             program.statements[2],
             Statement::Let {
-                value: Expr::IfLet { ref name, .. },
+                value: Expr::IfLet {
+                    pattern: IfLetPattern::Binding { ref name },
+                    ..
+                },
                 ..
             } if name == "value"
+        ));
+        assert!(matches!(
+            program.statements[4],
+            Statement::IfLet {
+                pattern: IfLetPattern::Variant {
+                    ref enum_name,
+                    ref variant,
+                    binding: Some(ref binding),
+                },
+                value: Expr::Variable(_),
+                ..
+            } if enum_name == "Result" && variant == "Ok" && binding == "inner"
         ));
     }
 

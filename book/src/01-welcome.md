@@ -207,6 +207,9 @@ let value = match result:
         len(message)
 
 print(value)
+
+if let Result.Ok(number) = result:
+    print(number)
 ```
 
 Arrays collect values of one type:
