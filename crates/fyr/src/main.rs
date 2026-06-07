@@ -1156,6 +1156,41 @@ fn label(status: Status) -> str:
     }
 
     #[test]
+    fn imported_invalid_match_arm_errors_use_arm_source_line() {
+        let root = temp_project_dir("import_invalid_match_arm_path");
+        fs::create_dir_all(root.join("src")).expect("source dir should create");
+        let lib = root.join("src/lib.fyr");
+        let main = root.join("src/main.fyr");
+        fs::write(
+            &lib,
+            r#"enum Status:
+    Ready
+
+enum Mode:
+    Ready
+
+let label = match Status.Ready:
+    Mode.Ready:
+        "mode"
+    else:
+        "other"
+"#,
+        )
+        .expect("lib should write");
+        fs::write(&main, "import \"lib.fyr\"\n").expect("main should write");
+        let args = vec![main.display().to_string()];
+
+        let error = check_files(&args).expect_err("invalid match arm should fail");
+
+        assert!(error.contains(&lib.display().to_string()));
+        assert!(error.contains(":8:5:"));
+        assert!(error.contains("match arm expected Status, found Mode.Ready"));
+        assert!(error.contains("8 |     Mode.Ready:"));
+        assert!(error.contains("  |     ^"));
+        fs::remove_dir_all(root).expect("test project should clean up");
+    }
+
+    #[test]
     fn imported_runtime_errors_include_imported_file_path() {
         let root = temp_project_dir("import_runtime_error_path");
         fs::create_dir_all(root.join("src")).expect("source dir should create");
@@ -1172,6 +1207,38 @@ fn label(status: Status) -> str:
         assert!(error.contains("division by zero"));
         assert!(error.contains("1 | 1 / 0"));
         assert!(error.contains("  | ^"));
+        fs::remove_dir_all(root).expect("test project should clean up");
+    }
+
+    #[test]
+    fn imported_match_arm_runtime_errors_include_imported_file_path() {
+        let root = temp_project_dir("import_match_arm_runtime_error_path");
+        fs::create_dir_all(root.join("src")).expect("source dir should create");
+        let lib = root.join("src/lib.fyr");
+        let main = root.join("src/main.fyr");
+        fs::write(
+            &lib,
+            r#"enum Status:
+    Ready
+    Failed
+
+let value = match Status.Ready:
+    Status.Ready:
+        1 / 0
+    Status.Failed:
+        0
+"#,
+        )
+        .expect("lib should write");
+        fs::write(&main, "import \"lib.fyr\"\n").expect("main should write");
+        let args = vec![main.display().to_string()];
+
+        let error = run_file(&args).expect_err("imported match arm runtime error should fail");
+
+        assert!(error.contains(&lib.display().to_string()));
+        assert!(error.contains(":7:"));
+        assert!(error.contains("division by zero"));
+        assert!(error.contains("7 |         1 / 0"));
         fs::remove_dir_all(root).expect("test project should clean up");
     }
 

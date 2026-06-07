@@ -92,7 +92,12 @@ impl Formatter {
                         self.output.push('\n');
                     }
                     self.write_indent(indent + 1);
-                    self.output.push_str(variant);
+                    self.output.push_str(&variant.name);
+                    if let Some(payload) = &variant.payload {
+                        self.output.push('(');
+                        self.output.push_str(&type_name(payload));
+                        self.output.push(')');
+                    }
                 }
             }
             Statement::Fn {
@@ -304,10 +309,19 @@ impl Formatter {
 
     fn match_pattern(&mut self, pattern: &MatchPattern) {
         match pattern {
-            MatchPattern::Variant { enum_name, variant } => {
+            MatchPattern::Variant {
+                enum_name,
+                variant,
+                binding,
+            } => {
                 self.output.push_str(enum_name);
                 self.output.push('.');
                 self.output.push_str(variant);
+                if let Some(binding) = binding {
+                    self.output.push('(');
+                    self.output.push_str(binding);
+                    self.output.push(')');
+                }
             }
             MatchPattern::Else => self.output.push_str("else"),
         }
@@ -371,6 +385,20 @@ impl Formatter {
                     self.expr(value, 0, 0);
                 }
                 self.output.push_str(" }");
+            }
+            Expr::EnumInit {
+                enum_name,
+                variant,
+                value,
+            } => {
+                self.output.push_str(enum_name);
+                self.output.push('.');
+                self.output.push_str(variant);
+                self.output.push('(');
+                if let Some(value) = value {
+                    self.expr(value, 0, 0);
+                }
+                self.output.push(')');
             }
             Expr::Field { object, field } => {
                 self.expr_inline(object, expr_precedence(expr));
@@ -444,7 +472,11 @@ fn expr_precedence(expr: &Expr) -> u8 {
         Expr::If { .. } | Expr::IfLet { .. } | Expr::Match { .. } => 0,
         Expr::Binary { op, .. } => binary_precedence(*op),
         Expr::Unary { .. } => 7,
-        Expr::Call { .. } | Expr::StructInit { .. } | Expr::Field { .. } | Expr::Index { .. } => 8,
+        Expr::Call { .. }
+        | Expr::StructInit { .. }
+        | Expr::EnumInit { .. }
+        | Expr::Field { .. }
+        | Expr::Index { .. } => 8,
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Bool(_)
@@ -714,13 +746,17 @@ enum   Status:
   Pending
   Ready
 let status:Status=Status.Ready
+enum Result:
+  Ok( i64 )
+  Err(str)
+let scored=Result.Ok(42)
 "#,
         )
         .expect("formatting should pass");
 
         assert_eq!(
             formatted,
-            "enum Status:\n    Pending\n    Ready\nlet status: Status = Status.Ready\n"
+            "enum Status:\n    Pending\n    Ready\nlet status: Status = Status.Ready\nenum Result:\n    Ok(i64)\n    Err(str)\nlet scored = Result.Ok(42)\n"
         );
     }
 
@@ -733,13 +769,18 @@ let label=match status:
     "pending"
   else:
     "other"
+let value=match result:
+  Result.Ok(inner):
+    inner
+  Result.Err(message):
+    len(message)
 "#,
         )
         .expect("formatting should pass");
 
         assert_eq!(
             formatted,
-            "let label = match status:\n    Status.Pending:\n        \"pending\"\n    else:\n        \"other\"\n"
+            "let label = match status:\n    Status.Pending:\n        \"pending\"\n    else:\n        \"other\"\nlet value = match result:\n    Result.Ok(inner):\n        inner\n    Result.Err(message):\n        len(message)\n"
         );
     }
 

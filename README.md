@@ -193,13 +193,13 @@ let p = Point { x: 3, y: 4 }
 print(p.x + p.y)
 ```
 
-Enums define closed state sets and can be handled with exhaustive `match` expressions:
+Enums define closed state sets. Variants can be unit values or carry one typed payload, and exhaustive `match` expressions can bind payloads safely:
 
 ```fyr
 enum Status:
     Pending
     Ready
-    Failed
+    Failed(str)
 
 fn label(status: Status) -> str:
     return match status:
@@ -207,10 +207,11 @@ fn label(status: Status) -> str:
             "pending"
         Status.Ready:
             "ready"
-        Status.Failed:
-            "failed"
+        Status.Failed(message):
+            message
 
 print(label(Status.Ready))
+print(label(Status.Failed("blocked")))
 ```
 
 Arrays are homogeneous and bounds-checked:
@@ -350,8 +351,8 @@ The bootstrap supports:
 - `while` loops plus array and string `for value in values` loops
 - `return`, `break`, and `continue`
 - `struct` declarations, struct literals, and field access
-- unit `enum` declarations with nominal variant values such as `Status.Ready`
-- exhaustive `match` expressions for enum variants, with `else` fallback arms when desired
+- `enum` declarations with nominal unit and payload variants such as `Status.Ready` and `Status.Failed("blocked")`
+- exhaustive `match` expressions for enum variants, with payload bindings and `else` fallback arms when desired
 - homogeneous array literals, `[T]` and `[T?]` annotations, typed empty arrays, append, reverse, first/last reads, concatenation with `+`, checked indexing, fallback reads, checked slicing, search/count helpers, emptiness checks, and `len(array)`
 - checked string indexing, character iteration, concatenation, containment, slicing, fallback reads, search/count helpers, split/join helpers, trim/case helpers, prefix/suffix checks, replacement, reverse, first/last reads, emptiness checks, and `len(str)`
 - relative file imports with `import "path/to/file.fyr"` for multi-file programs and projects
@@ -364,7 +365,7 @@ The bootstrap supports:
 - `fyr test <path...>` assertion-file execution
 - one-statement-per-line scripts
 
-The bootstrap typechecker enforces `i64`, `f64`, `bool`, `str`, `unit`, struct, enum, array, and nullable `T?` types across function calls, return values, branch expressions, `match` arms, assignments, equality, indexing, and supported operators. `i64` and `f64` do not implicitly mix yet; write `f64(count)` or `i64(score)` when a conversion is intentional. `i64(f64_value)` only accepts whole finite values in the exact integer range, and `f64(i64_value)` rejects precision-losing integers. `nil` requires an explicit nullable destination unless another branch or expected type supplies one. Use `maybe ?? fallback` to recover a concrete value with a fallback, or `if let value = maybe:` to bind the inner value only inside the present branch. Runtime integer arithmetic fails on overflow, division by zero, and remainder by zero instead of wrapping; `f64` arithmetic rejects divide/remainder by zero and non-finite results.
+The bootstrap typechecker enforces `i64`, `f64`, `bool`, `str`, `unit`, struct, enum, array, and nullable `T?` types across function calls, return values, branch expressions, `match` arms, enum payload constructors, assignments, equality, indexing, and supported operators. `i64` and `f64` do not implicitly mix yet; write `f64(count)` or `i64(score)` when a conversion is intentional. `i64(f64_value)` only accepts whole finite values in the exact integer range, and `f64(i64_value)` rejects precision-losing integers. `nil` requires an explicit nullable destination unless another branch or expected type supplies one. Use `maybe ?? fallback` to recover a concrete value with a fallback, or `if let value = maybe:` to bind the inner value only inside the present branch. Runtime integer arithmetic fails on overflow, division by zero, and remainder by zero instead of wrapping; `f64` arithmetic rejects divide/remainder by zero and non-finite results.
 
 The checker also rejects ambiguous declaration shapes such as duplicate bindings in the same scope, duplicate function parameters, duplicate struct fields, duplicate enum variants, duplicate or missing enum match arms, and value/function names that reuse a nominal type name.
 

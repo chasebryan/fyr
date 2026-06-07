@@ -1,5 +1,6 @@
 use crate::ast::{
-    BinaryOp, Expr, MatchArm, MatchPattern, Param, Program, Statement, TypeName, UnaryOp,
+    BinaryOp, EnumVariant, Expr, MatchArm, MatchPattern, Param, Program, Statement, TypeName,
+    UnaryOp,
 };
 use crate::diagnostic::{FyrError, FyrResult};
 use crate::lexer::{Token, TokenKind};
@@ -298,7 +299,7 @@ impl<'a> Parser<'a> {
         Ok(fields)
     }
 
-    fn enum_variants(&mut self) -> FyrResult<Vec<String>> {
+    fn enum_variants(&mut self) -> FyrResult<Vec<EnumVariant>> {
         self.consume(
             &TokenKind::Newline,
             "expected a newline before enum variants",
@@ -308,7 +309,7 @@ impl<'a> Parser<'a> {
 
         let mut variants = Vec::new();
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            let variant = match &self.advance().kind {
+            let name = match &self.advance().kind {
                 TokenKind::Identifier(name) => name.clone(),
                 _ => {
                     return Err(FyrError::new(
@@ -318,7 +319,18 @@ impl<'a> Parser<'a> {
                 }
             };
 
-            variants.push(variant);
+            let payload = if self.match_kind(&TokenKind::LParen) {
+                let ty = self.type_name()?;
+                self.consume(
+                    &TokenKind::RParen,
+                    "expected ')' after variant payload type",
+                )?;
+                Some(ty)
+            } else {
+                None
+            };
+
+            variants.push(EnumVariant { name, payload });
             self.consume_statement_separator()?;
         }
 
@@ -608,6 +620,7 @@ impl<'a> Parser<'a> {
         let mut arms = Vec::new();
         let mut saw_else = false;
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            let span = self.peek().span;
             if saw_else {
                 return Err(FyrError::new(
                     "match else arm must be last",
@@ -619,7 +632,11 @@ impl<'a> Parser<'a> {
             saw_else = matches!(pattern, MatchPattern::Else);
             self.consume(&TokenKind::Colon, "expected ':' after match arm pattern")?;
             let body = self.block("match arm")?;
-            arms.push(MatchArm { pattern, body });
+            arms.push(MatchArm {
+                pattern,
+                body,
+                span,
+            });
             self.skip_newlines();
         }
 
@@ -659,7 +676,31 @@ impl<'a> Parser<'a> {
             }
         };
 
-        Ok(MatchPattern::Variant { enum_name, variant })
+        let binding = if self.match_kind(&TokenKind::LParen) {
+            let token = self.advance();
+            let binding = match &token.kind {
+                TokenKind::Identifier(name) => name.clone(),
+                _ => {
+                    return Err(FyrError::new(
+                        "expected a payload binding name in match arm",
+                        token.span,
+                    ));
+                }
+            };
+            self.consume(
+                &TokenKind::RParen,
+                "expected ')' after match payload binding",
+            )?;
+            Some(binding)
+        } else {
+            None
+        };
+
+        Ok(MatchPattern::Variant {
+            enum_name,
+            variant,
+            binding,
+        })
     }
 
     fn if_let_header(&mut self) -> FyrResult<(String, Expr)> {
@@ -825,13 +866,6 @@ impl<'a> Parser<'a> {
 
         loop {
             if self.match_kind(&TokenKind::LParen) {
-                let Expr::Variable(callee) = expr else {
-                    return Err(FyrError::new(
-                        "only named functions can be called in Fyr bootstrap",
-                        self.previous().span,
-                    ));
-                };
-
                 let mut args = Vec::new();
                 if !self.check(&TokenKind::RParen) {
                     loop {
@@ -843,7 +877,34 @@ impl<'a> Parser<'a> {
                 }
 
                 self.consume(&TokenKind::RParen, "expected ')' after function arguments")?;
-                expr = Expr::Call { callee, args };
+                expr = match expr {
+                    Expr::Variable(callee) => Expr::Call { callee, args },
+                    Expr::Field { object, field } => {
+                        let Expr::Variable(enum_name) = *object else {
+                            return Err(FyrError::new(
+                                "only named functions and enum variants can be called in Fyr bootstrap",
+                                self.previous().span,
+                            ));
+                        };
+                        if args.len() > 1 {
+                            return Err(FyrError::new(
+                                "enum variant constructors take at most one payload",
+                                self.previous().span,
+                            ));
+                        }
+                        Expr::EnumInit {
+                            enum_name,
+                            variant: field,
+                            value: args.into_iter().next().map(Box::new),
+                        }
+                    }
+                    _ => {
+                        return Err(FyrError::new(
+                            "only named functions and enum variants can be called in Fyr bootstrap",
+                            self.previous().span,
+                        ));
+                    }
+                };
                 continue;
             }
 
@@ -1329,7 +1390,18 @@ let status: Status = Status.Ready
                 ref name,
                 ref variants,
                 ..
-            } if name == "Status" && variants == &vec!["Pending".to_owned(), "Ready".to_owned()]
+            } if name == "Status"
+                && variants
+                    == &vec![
+                        EnumVariant {
+                            name: "Pending".to_owned(),
+                            payload: None,
+                        },
+                        EnumVariant {
+                            name: "Ready".to_owned(),
+                            payload: None,
+                        },
+                    ]
         ));
         assert!(matches!(
             program.statements[1],
@@ -1363,10 +1435,67 @@ let label = match status:
             } if arms.len() == 3
                 && matches!(
                     arms[0].pattern,
-                    MatchPattern::Variant { ref enum_name, ref variant }
+                    MatchPattern::Variant { ref enum_name, ref variant, binding: None }
                     if enum_name == "Status" && variant == "Pending"
                 )
                 && matches!(arms[2].pattern, MatchPattern::Else)
+        ));
+    }
+
+    #[test]
+    fn parses_payload_enum_variants_and_match_bindings() {
+        let tokens = lex(r#"
+enum Result:
+    Ok(i64)
+    Err(str)
+
+let result = Result.Ok(42)
+let value = match result:
+    Result.Ok(inner):
+        inner
+    Result.Err(message):
+        len(message)
+"#)
+        .expect("lexing should pass");
+        let program = parse(&tokens).expect("parsing should pass");
+
+        assert!(matches!(
+            program.statements[0],
+            Statement::Enum {
+                ref name,
+                ref variants,
+                ..
+            } if name == "Result"
+                && variants.len() == 2
+                && variants[0].name == "Ok"
+                && variants[0].payload.as_ref() == Some(&TypeName::I64)
+                && variants[1].name == "Err"
+                && variants[1].payload.as_ref() == Some(&TypeName::Str)
+        ));
+        assert!(matches!(
+            program.statements[1],
+            Statement::Let {
+                value: Expr::EnumInit {
+                    ref enum_name,
+                    ref variant,
+                    value: Some(_),
+                },
+                ..
+            } if enum_name == "Result" && variant == "Ok"
+        ));
+        assert!(matches!(
+            program.statements[2],
+            Statement::Let {
+                value: Expr::Match { ref arms, .. },
+                ..
+            } if matches!(
+                arms[0].pattern,
+                MatchPattern::Variant {
+                    ref enum_name,
+                    ref variant,
+                    binding: Some(ref binding),
+                } if enum_name == "Result" && variant == "Ok" && binding == "inner"
+            )
         ));
     }
 

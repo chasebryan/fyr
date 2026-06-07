@@ -171,13 +171,13 @@ let p = Point { x: 3, y: 4 }
 print(p.x + p.y)
 ```
 
-Enums name a closed set of states:
+Enums name a closed set of states, and variants can carry one typed payload:
 
 ```fyr
 enum Status:
     Pending
     Ready
-    Failed
+    Failed(str)
 
 let status: Status = Status.Ready
 
@@ -186,10 +186,27 @@ let label = match status:
         "pending"
     Status.Ready:
         "ready"
-    Status.Failed:
-        "failed"
+    Status.Failed(message):
+        message
 
 print(label)
+```
+
+Payload constructors use `Enum.Variant(value)`, and a matching arm can bind that payload:
+
+```fyr
+enum Result:
+    Ok(i64)
+    Err(str)
+
+let result = Result.Ok(42)
+let value = match result:
+    Result.Ok(number):
+        number
+    Result.Err(message):
+        len(message)
+
+print(value)
 ```
 
 Arrays collect values of one type:

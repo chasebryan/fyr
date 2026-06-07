@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use crate::ast::{
-    BinaryOp, Expr, MatchArm, MatchPattern, Param, Program, Statement, TypeName, UnaryOp,
+    BinaryOp, EnumVariant, Expr, MatchArm, MatchPattern, Param, Program, Statement, TypeName,
+    UnaryOp,
 };
 use crate::diagnostic::{FyrError, FyrResult};
 use crate::span::Span;
@@ -25,6 +26,7 @@ pub enum Value {
     Enum {
         name: String,
         variant: String,
+        payload: Option<Box<Value>>,
     },
     Function(Function),
     Unit,
@@ -54,7 +56,17 @@ impl Display for Value {
                 write!(f, "[{values}]")
             }
             Value::Struct { name, .. } => write!(f, "<{name}>"),
-            Value::Enum { name, variant } => write!(f, "{name}.{variant}"),
+            Value::Enum {
+                name,
+                variant,
+                payload,
+            } => {
+                if let Some(payload) = payload {
+                    write!(f, "{name}.{variant}({payload})")
+                } else {
+                    write!(f, "{name}.{variant}")
+                }
+            }
             Value::Function(_) => write!(f, "<fn>"),
             Value::Unit => write!(f, "()"),
         }
@@ -71,7 +83,7 @@ pub struct RunResult {
 pub struct Evaluator {
     scopes: Vec<HashMap<String, Binding>>,
     structs: HashMap<String, Vec<Param>>,
-    enums: HashMap<String, Vec<String>>,
+    enums: HashMap<String, Vec<EnumVariant>>,
     outputs: Vec<String>,
 }
 
@@ -347,7 +359,7 @@ impl Evaluator {
         Ok(())
     }
 
-    fn define_enum(&mut self, name: &str, variants: &[String]) -> FyrResult<()> {
+    fn define_enum(&mut self, name: &str, variants: &[EnumVariant]) -> FyrResult<()> {
         if self.enums.contains_key(name)
             || self.structs.contains_key(name)
             || self.current_scope().contains_key(name)
@@ -357,9 +369,10 @@ impl Evaluator {
 
         let mut seen = HashMap::new();
         for variant in variants {
-            if seen.insert(variant.clone(), ()).is_some() {
+            if seen.insert(variant.name.clone(), ()).is_some() {
                 return Err(runtime_error(format!(
-                    "enum '{name}' has duplicate variant '{variant}'"
+                    "enum '{name}' has duplicate variant '{}'",
+                    variant.name
                 )));
             }
         }
@@ -403,6 +416,11 @@ impl Evaluator {
             Expr::Binary { left, op, right } => self.eval_binary(left, *op, right),
             Expr::Call { callee, args } => self.eval_call(callee, args),
             Expr::StructInit { name, fields } => self.eval_struct_init(name, fields),
+            Expr::EnumInit {
+                enum_name,
+                variant,
+                value,
+            } => self.eval_enum_init(enum_name, variant, value.as_deref()),
             Expr::Field { object, field } => self.eval_field(object, field),
             Expr::Array(elements) => self.eval_array(elements),
             Expr::Index { collection, index } => self.eval_index(collection, index),
@@ -563,10 +581,16 @@ impl Evaluator {
         if let Expr::Variable(enum_name) = object
             && let Some(variants) = self.enums.get(enum_name)
         {
-            if variants.iter().any(|variant| variant == field) {
+            if let Some(variant) = variants.iter().find(|variant| variant.name == field) {
+                if variant.payload.is_some() {
+                    return Err(runtime_error(format!(
+                        "enum variant '{enum_name}.{field}' needs a payload"
+                    )));
+                }
                 return Ok(Flow::Value(Value::Enum {
                     name: enum_name.clone(),
                     variant: field.to_owned(),
+                    payload: None,
                 }));
             }
 
@@ -587,6 +611,63 @@ impl Evaluator {
             ))),
             flow => Ok(flow),
         }
+    }
+
+    fn eval_enum_init(
+        &mut self,
+        enum_name: &str,
+        variant_name: &str,
+        value: Option<&Expr>,
+    ) -> FyrResult<Flow> {
+        let variant = self
+            .enums
+            .get(enum_name)
+            .and_then(|variants| variants.iter().find(|variant| variant.name == variant_name))
+            .cloned()
+            .ok_or_else(|| {
+                if self.enums.contains_key(enum_name) {
+                    runtime_error(format!(
+                        "enum '{enum_name}' has no variant '{variant_name}'"
+                    ))
+                } else {
+                    runtime_error(format!("unknown enum '{enum_name}'"))
+                }
+            })?;
+
+        let payload = match (&variant.payload, value) {
+            (Some(expected), Some(value)) => {
+                let value = match self.eval_expr_flow(value)? {
+                    Flow::Value(value) => value,
+                    flow => return Ok(flow),
+                };
+                if !value_matches_type(&value, expected) {
+                    return Err(runtime_error(format!(
+                        "enum variant '{enum_name}.{variant_name}' expected {}, found {}",
+                        format_type_name(expected),
+                        format_value_type(&value)
+                    )));
+                }
+                Some(Box::new(value))
+            }
+            (Some(expected), None) => {
+                return Err(runtime_error(format!(
+                    "enum variant '{enum_name}.{variant_name}' expected payload {}",
+                    format_type_name(expected)
+                )));
+            }
+            (None, Some(_)) => {
+                return Err(runtime_error(format!(
+                    "enum variant '{enum_name}.{variant_name}' does not take a payload"
+                )));
+            }
+            (None, None) => None,
+        };
+
+        Ok(Flow::Value(Value::Enum {
+            name: enum_name.to_owned(),
+            variant: variant_name.to_owned(),
+            payload,
+        }))
     }
 
     fn eval_unary(&self, op: UnaryOp, value: Value) -> FyrResult<Value> {
@@ -797,7 +878,7 @@ impl Evaluator {
                     Flow::Value(value) => value,
                     flow => return Ok(flow),
                 };
-                Ok(Flow::Value(Value::Str(value.type_name().to_owned())))
+                Ok(Flow::Value(Value::Str(format_value_type(&value))))
             }
             other => self.eval_user_call(other, args),
         }
@@ -1473,25 +1554,93 @@ impl Evaluator {
             flow => return Ok(flow),
         };
 
-        let Value::Enum { name, variant } = value else {
+        let Value::Enum {
+            name,
+            variant,
+            payload,
+        } = value
+        else {
             return Err(runtime_error(format!(
                 "match expected an enum value, found {}",
                 value.type_name()
             )));
         };
 
+        let variants = self
+            .enums
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| runtime_error(format!("match expected an enum, found {name}")))?;
+        let mut seen = Vec::new();
+        let mut saw_else = false;
+        let mut matched_arm = None;
         let mut else_arm = None;
+
         for arm in arms {
+            if saw_else {
+                return Err(
+                    runtime_error("match else arm must be last").with_fallback_span(arm.span)
+                );
+            }
+
             match &arm.pattern {
                 MatchPattern::Variant {
                     enum_name,
                     variant: arm_variant,
-                } if enum_name == &name && arm_variant == &variant => {
-                    return self.eval_block_scoped(&arm.body);
+                    binding,
+                } => {
+                    if enum_name != &name {
+                        return Err(runtime_error(format!(
+                            "match arm expected {name}, found {enum_name}.{arm_variant}"
+                        ))
+                        .with_fallback_span(arm.span));
+                    }
+                    let Some(declared) = variants
+                        .iter()
+                        .find(|declared| declared.name == *arm_variant)
+                    else {
+                        return Err(runtime_error(format!(
+                            "enum '{name}' has no variant '{arm_variant}'"
+                        ))
+                        .with_fallback_span(arm.span));
+                    };
+                    if binding.is_some() && declared.payload.is_none() {
+                        return Err(runtime_error(format!(
+                            "match arm binding for {name}.{arm_variant} expected a payload"
+                        ))
+                        .with_fallback_span(arm.span));
+                    }
+                    if seen.iter().any(|seen| seen == arm_variant) {
+                        return Err(runtime_error(format!(
+                            "match has duplicate arm for {name}.{arm_variant}"
+                        ))
+                        .with_fallback_span(arm.span));
+                    }
+                    seen.push(arm_variant.clone());
+                    if arm_variant == &variant {
+                        matched_arm = Some((arm, declared.payload.clone()));
+                    }
                 }
-                MatchPattern::Else => else_arm = Some(arm),
-                _ => {}
+                MatchPattern::Else => {
+                    saw_else = true;
+                    else_arm = Some(arm);
+                }
             }
+        }
+
+        if else_arm.is_none() {
+            for variant in variants {
+                if !seen.iter().any(|seen| seen == &variant.name) {
+                    return Err(runtime_error(format!(
+                        "match missing arm for {name}.{}",
+                        variant.name
+                    )));
+                }
+            }
+        }
+
+        if let Some((arm, payload_type)) = matched_arm {
+            return self.eval_match_arm(arm, payload_type.as_ref(), payload.as_deref());
         }
 
         if let Some(arm) = else_arm {
@@ -1501,6 +1650,35 @@ impl Evaluator {
         Err(runtime_error(format!(
             "match missing arm for {name}.{variant}"
         )))
+    }
+
+    fn eval_match_arm(
+        &mut self,
+        arm: &MatchArm,
+        payload_type: Option<&TypeName>,
+        payload: Option<&Value>,
+    ) -> FyrResult<Flow> {
+        let MatchPattern::Variant { binding, .. } = &arm.pattern else {
+            return self.eval_block_scoped(&arm.body);
+        };
+        let Some(binding) = binding else {
+            return self.eval_block_scoped(&arm.body);
+        };
+        let Some(payload_type) = payload_type else {
+            return Err(
+                runtime_error("match arm binding expected a payload").with_fallback_span(arm.span)
+            );
+        };
+        let Some(payload) = payload else {
+            return Err(runtime_error("match arm binding expected a payload value")
+                .with_fallback_span(arm.span));
+        };
+
+        self.push_scope();
+        self.define(binding, payload.clone(), payload_type.clone(), false)?;
+        let result = self.eval_block(&arm.body);
+        self.pop_scope();
+        result
     }
 
     fn eval_while(&mut self, condition: &Expr, body: &[Statement]) -> FyrResult<Flow> {
@@ -2673,6 +2851,8 @@ let history: [Status] = [Status.Pending, status]
 assert(status == Status.Ready)
 assert(status != Status.Pending)
 assert(contains(history, Status.Pending))
+assert(type(status) == "Status")
+assert(type(history) == "[Status]")
 print(status)
 status
 "#)
@@ -2682,7 +2862,8 @@ status
             result.last_value,
             Value::Enum {
                 name: "Status".to_owned(),
-                variant: "Ready".to_owned()
+                variant: "Ready".to_owned(),
+                payload: None,
             }
         );
         assert_eq!(result.outputs, vec!["Status.Ready"]);
@@ -2714,6 +2895,128 @@ ready
         .expect("enum match should run");
 
         assert_eq!(result.last_value, Value::Str("ready".to_owned()));
+    }
+
+    #[test]
+    fn supports_payload_enum_variants_and_match_bindings() {
+        let result = run(r#"
+enum Result:
+    Ok(i64)
+    Err(str)
+
+fn unwrap_or_len(result: Result) -> i64:
+    return match result:
+        Result.Ok(value):
+            value + 1
+        Result.Err(message):
+            len(message)
+
+let ok = Result.Ok(41)
+let err = Result.Err("oops")
+assert(ok == Result.Ok(41))
+assert(ok != Result.Ok(42))
+assert(unwrap_or_len(ok) == 42)
+assert(unwrap_or_len(err) == 4)
+print(ok)
+ok
+"#)
+        .expect("payload enum program should run");
+
+        assert_eq!(
+            result.last_value,
+            Value::Enum {
+                name: "Result".to_owned(),
+                variant: "Ok".to_owned(),
+                payload: Some(Box::new(Value::Int(41))),
+            }
+        );
+        assert_eq!(result.outputs, vec!["Result.Ok(41)"]);
+    }
+
+    #[test]
+    fn rejects_runtime_enum_match_arm_errors() {
+        let missing = run(r#"
+enum Status:
+    Pending
+    Ready
+
+match Status.Ready:
+    Status.Ready:
+        "ready"
+"#)
+        .expect_err("missing runtime match arm should fail");
+        assert!(
+            missing
+                .message
+                .contains("match missing arm for Status.Pending")
+        );
+
+        let duplicate = run(r#"
+enum Status:
+    Ready
+
+match Status.Ready:
+    Status.Ready:
+        "ready"
+    Status.Ready:
+        "again"
+"#)
+        .expect_err("duplicate runtime match arm should fail");
+        assert!(
+            duplicate
+                .message
+                .contains("match has duplicate arm for Status.Ready")
+        );
+        assert_eq!((duplicate.line, duplicate.column), (8, 5));
+
+        let wrong_enum = run(r#"
+enum Status:
+    Ready
+
+enum Mode:
+    Ready
+
+match Status.Ready:
+    Mode.Ready:
+        "ready"
+    else:
+        "other"
+"#)
+        .expect_err("wrong runtime enum match arm should fail");
+        assert!(
+            wrong_enum
+                .message
+                .contains("match arm expected Status, found Mode.Ready")
+        );
+        assert_eq!((wrong_enum.line, wrong_enum.column), (9, 5));
+
+        let unit_binding = run(r#"
+enum Status:
+    Ready
+
+match Status.Ready:
+    Status.Ready(value):
+        value
+"#)
+        .expect_err("unit runtime match binding should fail");
+        assert!(
+            unit_binding
+                .message
+                .contains("match arm binding for Status.Ready expected a payload")
+        );
+
+        let missing_payload = run(r#"
+enum Result:
+    Ok(i64)
+
+Result.Ok
+"#)
+        .expect_err("missing runtime enum payload should fail");
+        assert!(
+            missing_payload
+                .message
+                .contains("enum variant 'Result.Ok' needs a payload")
+        );
     }
 
     #[test]
@@ -3394,6 +3697,38 @@ left + right
                 Value::Int(4)
             ])
         );
+    }
+
+    #[test]
+    fn runs_branch_empty_arrays_with_expected_types() {
+        let result = run(r#"
+enum Source:
+    Empty
+    Full
+
+let flag = true
+let from_if: [i64] = if flag:
+    []
+else:
+    [1, 2]
+
+let maybe: i64? = nil
+let from_if_let: [i64] = if let value = maybe:
+    [value]
+else:
+    []
+
+let from_match: [i64] = match Source.Empty:
+    Source.Empty:
+        []
+    Source.Full:
+        [3, 5]
+
+len(from_if) + len(from_if_let) + len(from_match)
+"#)
+        .expect("branch empty arrays should use annotated result types");
+
+        assert_eq!(result.last_value, Value::Int(0));
     }
 
     #[test]

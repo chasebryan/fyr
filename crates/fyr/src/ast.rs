@@ -42,7 +42,7 @@ pub enum Statement {
     },
     Enum {
         name: String,
-        variants: Vec<String>,
+        variants: Vec<EnumVariant>,
         span: Span,
         source_path: Option<PathBuf>,
     },
@@ -268,15 +268,26 @@ pub struct Param {
     pub ty: TypeName,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumVariant {
+    pub name: String,
+    pub payload: Option<TypeName>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: MatchPattern,
     pub body: Vec<Statement>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchPattern {
-    Variant { enum_name: String, variant: String },
+    Variant {
+        enum_name: String,
+        variant: String,
+        binding: Option<String>,
+    },
     Else,
 }
 
@@ -317,6 +328,11 @@ pub enum Expr {
     StructInit {
         name: String,
         fields: Vec<(String, Expr)>,
+    },
+    EnumInit {
+        enum_name: String,
+        variant: String,
+        value: Option<Box<Expr>>,
     },
     Field {
         object: Box<Expr>,
@@ -365,6 +381,11 @@ impl Expr {
             }
             Expr::StructInit { fields, .. } => {
                 for (_, value) in fields {
+                    value.set_source_path_recursive(path);
+                }
+            }
+            Expr::EnumInit { value, .. } => {
+                if let Some(value) = value {
                     value.set_source_path_recursive(path);
                 }
             }
